@@ -61,6 +61,11 @@ class PmKfdUpstreamTests(unittest.TestCase):
                          ('amdgpu_pasid_drain_irq', 'amdgpu_pasid_drain_irq_done'))
         self.run_program(DRAIN_HARNESS.replace('ACTUAL_DRAIN', body))
 
+    def test_available_memory_pin_credit(self):
+        body = self.function('amdgpu/amdgpu_amdkfd_gpuvm.c',
+                             'amdgpu_amdkfd_get_available_memory')
+        self.run_program(ACCOUNT_COMMON + body + ACCOUNT_MAIN)
+
 
 PM_COMMON = r'''
 #include <assert.h>
@@ -370,6 +375,67 @@ int main(void)
     send_error = -EIO;
     assert(!amdgpu_pasid_drain_irq(&adev, 7, packet, 50));
     assert(!waits && sends == 1 && !locked);
+    return 0;
+}
+"""
+
+
+
+ACCOUNT_COMMON = r"""
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <sys/types.h>
+#define MiB (1024ULL * 1024)
+#define PAGE_SIZE 4096
+#define VRAM_AVAILABLITY_ALIGN (2 * MiB)
+#define ALIGN_DOWN(v,a) ((v) & ~((a) - 1))
+#define min3(a,b,c) ((a) < (b) ? ((a) < (c) ? (a) : (c)) : ((b) < (c) ? (b) : (c)))
+#define atomic64_read(p) (*(p))
+#define KFD_XCP_MEMORY_SIZE(a,id) ((a)->size[id])
+#define ESTIMATE_PT_SIZE(v) (v)
+static uint64_t amdgpu_amdkfd_total_mem_size;
+static bool no_system_mem_limit;
+struct amdgpu_ras { uint64_t reserved_pages_in_bytes; };
+struct amdgpu_device {
+    bool apu_prefer_gtt;
+    struct { bool is_app_apu; } gmc;
+    struct { int64_t vram_used[2]; uint64_t vram_used_aligned[2], vram_pinned; } kfd;
+    uint64_t size[2], vram_pin_size;
+    struct amdgpu_ras *ras;
+};
+static struct {
+    uint64_t max_system_mem_limit, max_ttm_mem_limit, system_mem_used, ttm_mem_used;
+    bool mem_limit_lock;
+} kfd_mem_limit;
+static struct amdgpu_ras *amdgpu_ras_get_context(struct amdgpu_device *a) { return a->ras; }
+static void spin_lock(bool *p) { assert(!*p); *p = true; }
+static void spin_unlock(bool *p) { assert(*p); *p = false; }
+"""
+ACCOUNT_MAIN = r"""
+int main(void)
+{
+    struct amdgpu_device adev = {0};
+    struct amdgpu_ras ras = { .reserved_pages_in_bytes = 2 * MiB };
+    adev.size[0] = 64 * MiB;
+    adev.kfd.vram_used_aligned[0] = 16 * MiB;
+    adev.kfd.vram_pinned = 8 * MiB;
+    adev.vram_pin_size = 12 * MiB;
+    assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 44 * MiB);
+    adev.ras = &ras;
+    amdgpu_amdkfd_total_mem_size = 2 * MiB;
+    assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 40 * MiB);
+    adev.vram_pin_size = 60 * MiB;
+    assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 0);
+    adev.apu_prefer_gtt = true;
+    kfd_mem_limit.max_system_mem_limit = 32 * MiB;
+    kfd_mem_limit.max_ttm_mem_limit = 64 * MiB;
+    kfd_mem_limit.system_mem_used = 12 * MiB;
+    assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 20 * MiB);
+    no_system_mem_limit = true;
+    assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 32 * MiB);
+    assert(!kfd_mem_limit.mem_limit_lock);
     return 0;
 }
 """

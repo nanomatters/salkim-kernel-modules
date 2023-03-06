@@ -136,3 +136,6 @@ drm/amdkfd: Disable debugging before retiring queues.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/6c056350226aac4aef57d36b262bc36e64bd40ca
 drm/amdkfd: Bound interrupt drains during debugger exit.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/b8257bdb26ca5d9a75f4b81f629422f17afa221b
+drm/amdkfd: Credit pinned KFD memory.
