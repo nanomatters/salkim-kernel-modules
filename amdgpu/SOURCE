@@ -130,3 +130,6 @@ drm/amd/pm: Mark the active DPM clock level.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/d2c1e98658b6c2ba95c61cef24693520edc82b07
 drm/amd/pm: Restore supported energy readings.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/95263281fd7567b7c511c69a4c9d0ea7b21bb268
+drm/amdkfd: Disable debugging before retiring queues.

@@ -52,6 +52,10 @@ class PmKfdUpstreamTests(unittest.TestCase):
                             'smu_reapply_performance_level')) + '\n' + source
         self.run_program(PM_COMMON + source + UMD_MAIN)
 
+    def test_debug_exit_order(self):
+        body = self.function('amdkfd/kfd_process.c', 'kfd_process_notifier_release_internal')
+        self.run_program(DEBUG_HARNESS.replace('ACTUAL_EXIT', body))
+
 
 PM_COMMON = r'''
 #include <assert.h>
@@ -209,6 +213,93 @@ int main(void)
     return 0;
 }
 '''
+
+
+DEBUG_HARNESS = r"""
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
+struct work { bool pending; };
+struct mutex { bool held; };
+struct amdgpu_device { unsigned gfxoff; };
+struct kfd_node { struct amdgpu_device *adev; bool restore; };
+struct kfd_process_device { struct kfd_node *dev; };
+struct kfd_process;
+struct pqm { struct kfd_process *owner; bool destroyed; };
+struct kfd_process {
+    struct work eviction_work, restore_work, signal_work;
+    struct pqm pqm;
+    int n_pdds, debugged_process_count, context_id, mmu_notifier;
+    struct kfd_process_device *pdds[1];
+    struct { bool ttmp_setup; } runtime_info;
+    struct mutex mutex;
+    struct kfd_process *debugger_process;
+    void *mm;
+    bool table_removed, debug_disabled, retired;
+    unsigned unrefs;
+};
+static struct kfd_process *visible;
+static int kfd_processes_srcu;
+static unsigned puts;
+#define KFD_CONTEXT_ID_PRIMARY 0
+#define atomic_read(p) (*(p))
+#define hash_for_each_rcu(table, index, target, member) \
+    for ((index) = 0; (index) < (visible ? 1u : 0u) && ((target) = visible); (index)++)
+static int srcu_read_lock(int *p) { return 1; }
+static void srcu_read_unlock(int *p, int index) { assert(index == 1); }
+static void mutex_lock_nested(struct mutex *p, int n) { assert(!p->held); p->held = true; }
+static void mutex_unlock(struct mutex *p) { assert(p->held); p->held = false; }
+static void kfd_process_table_remove(struct kfd_process *p) { p->table_removed = true; }
+static bool cancel_delayed_work_sync(struct work *p) { bool pending = p->pending; p->pending = false; return pending; }
+static void kfd_unref_process(struct kfd_process *p) { p->unrefs++; }
+static void debug_disable(struct kfd_process *p)
+{
+    assert(!p->retired && p->mm);
+    p->debug_disabled = true;
+    if (p->debugger_process) p->debugger_process->debugged_process_count--;
+}
+#define kfd_dbg_trap_disable(p, ...) debug_disable(p)
+static void kfd_process_dequeue_from_all_devices(struct kfd_process *p)
+{
+    assert(p->table_removed && p->debug_disabled && p->mm);
+    p->retired = true;
+}
+static void pqm_uninit(struct pqm *p) { assert(p->owner->retired); p->destroyed = true; }
+static bool kfd_dbg_is_rlc_restore_supported(struct kfd_node *n) { return n->restore; }
+static void amdgpu_gfx_off_ctrl(struct amdgpu_device *a, bool enable) { assert(enable); a->gfxoff++; }
+static void mmu_notifier_put(int *p) { puts++; }
+ACTUAL_EXIT
+int main(void)
+{
+    for (unsigned flags = 0; flags < 64; flags++) {
+        struct amdgpu_device adev = {0};
+        struct kfd_node node = { .adev = &adev, .restore = flags & 1 };
+        struct kfd_process_device pdd = { .dev = &node };
+        struct kfd_process p = {0}, target = {0};
+        p.pqm.owner = &p;
+        p.mm = &p;
+        p.pdds[0] = &pdd;
+        p.n_pdds = !!(flags & 2);
+        p.runtime_info.ttmp_setup = flags & 4;
+        p.signal_work.pending = flags & 8;
+        p.context_id = !!(flags & 16);
+        p.debugged_process_count = !!(flags & 32);
+        target.mm = &target;
+        target.debugger_process = &p;
+        visible = flags & 32 ? &target : NULL;
+        puts = 0;
+        kfd_process_notifier_release_internal(&p);
+        assert(p.retired && p.pqm.destroyed && !p.mm && p.debug_disabled);
+        assert(p.unrefs == !!(flags & 8));
+        assert(puts == !(flags & 16));
+        assert(adev.gfxoff == (!(flags & 1) && !!(flags & 2) && !!(flags & 4)));
+        assert(target.debug_disabled == !!(flags & 32));
+        assert(!p.debugged_process_count && !target.mutex.held);
+    }
+    return 0;
+}
+"""
 
 
 if __name__ == '__main__':
