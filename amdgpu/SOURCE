@@ -290,3 +290,5 @@ b0098f52a38d045a4c60db475f1cd19823954b0a drm/amd/display: Test DMUB software ini
 ad11b99ea7bd17d6f0d8d6aa2103ca6d1f9021c6 drm/amdgpu/gfx7: Flush ring-test scratch writes.
 
 dc5fa3ab725298bd96e51554688eec0f481050fb drm/amdgpu/gmc11: Avoid fault registers during GPU reset.
+
+11a08cd5ab256675e8d9f32aa2720ef656107d9d drm/amdgpu: Keep VKMS modeset callbacks out of GPU reset.
