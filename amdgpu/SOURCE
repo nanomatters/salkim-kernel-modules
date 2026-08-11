@@ -272,3 +272,5 @@ ea5f7bfe28d331f62f20a68a0ac78ab820bc6deb drm/amd/display: Refresh DCN32 memory-c
 ebbbbaf4abe6c7a65c030127d1d6763e8ec2a4a0 drm/amd/pm: Refresh UCLK levels after overdrive changes.
 
 e3d5618d4dad30e51918bc53375e4e376115a218 drm/amd/display: Test GPU memory allocation.
+
+9ebd70b746ce7e35c5d9a1c040d75cc10bdb9bea drm/amd/display: Test DMUB register callbacks.
