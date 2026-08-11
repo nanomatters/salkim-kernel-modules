@@ -92,3 +92,4 @@ ff30f43e2ee03c335dab25c55b3902d4f228a6f5 Fix CRTC initialization cleanup.
 3254ed0b15f2fe656c9cb36ccb59b92422440bf8 Stop restore retries after GPU removal.
 770fe0ab82f67d1ce9ae050f94082b3f43c6bdd8 Accept raw GPU addresses in mapping lookups.
 a04891c9dc4c7e88dc829da8d754363e211bf0b9 Add timeline syncobj signalling to USERQ_SIGNAL.
+aae34734e429811386363603425645662d7c94c9 Advertise AMDGPU interface 3.65.
