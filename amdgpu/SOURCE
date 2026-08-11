@@ -276,3 +276,5 @@ e3d5618d4dad30e51918bc53375e4e376115a218 drm/amd/display: Test GPU memory alloca
 9ebd70b746ce7e35c5d9a1c040d75cc10bdb9bea drm/amd/display: Test DMUB register callbacks.
 
 7527232a60bc1507e88092bc70b4f2f1d19dbfe8 drm/amd/display: Test VBIOS bounding box handling.
+
+101ff514dba47fedcea0bf666f84b928feddf803 drm/amd/display: Test DMUB firmware selection.
