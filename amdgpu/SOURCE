@@ -212,3 +212,5 @@ a2e3d83f5fc88e0c619ffe9dfd3549aa9cefe8bd drm/amdgpu/gfx8: Flush ring-test scratc
 e61b299b866e4ff06145a87da304af9a169231f9 drm/amdgpu: Use RSMU registers for NBIO 6.3.2.
 
 7a89ce1a01a06681d1083054f5fb3d54649fc54a drm/amd/display: Define missing CRC engine registers.
+
+822d6320fceebca32d95afb139f8b9eb8d60e125 drm/amdgpu: Finish recovery before restarting schedulers.
