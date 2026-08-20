@@ -103,3 +103,6 @@ b5ea7a31dc80812cec705cbe6cae78f52a597004 Report MES failure wait results and fir
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/2dd4abe27a40b48a521b0536044949eaaf9fed3b
 drm/amdgpu: Remove the obsolete firmware mutex.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/b6c6c14aa63a2f76d47185e5046db5d62604aa8b
+drm/amdgpu: Allocate MES query storage during software init.
