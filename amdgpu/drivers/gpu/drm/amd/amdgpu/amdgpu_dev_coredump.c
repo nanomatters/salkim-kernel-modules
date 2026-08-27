@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /*
  * Copyright 2024 Advanced Micro Devices, Inc.
  *
@@ -256,10 +257,9 @@ amdgpu_devcoredump_print_ibs(struct drm_printer *p,
 			goto unlock;
 
 		for (int i = 0; i < coredump->num_ibs; i++) {
-			u64 pfn = (coredump->ibs[i].gpu_addr &
-				   AMDGPU_GMC_HOLE_MASK) / AMDGPU_GPU_PAGE_SIZE;
+			u64 addr = coredump->ibs[i].gpu_addr & AMDGPU_GMC_HOLE_MASK;
 
-			mapping = amdgpu_vm_bo_lookup_mapping(vm, pfn);
+			mapping = amdgpu_vm_bo_lookup_mapping(vm, addr);
 			if (!mapping)
 				continue;
 
@@ -280,8 +280,7 @@ amdgpu_devcoredump_print_ibs(struct drm_printer *p,
 			continue;
 
 		va_start = coredump->ibs[i].gpu_addr & AMDGPU_GMC_HOLE_MASK;
-		mapping = amdgpu_vm_bo_lookup_mapping(vm,
-						      va_start / AMDGPU_GPU_PAGE_SIZE);
+		mapping = amdgpu_vm_bo_lookup_mapping(vm, va_start);
 		if (!mapping)
 			goto output_ib_content;
 
