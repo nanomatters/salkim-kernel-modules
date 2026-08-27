@@ -1,3 +1,4 @@
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /*
  * Copyright 2016 Advanced Micro Devices, Inc.
  *
@@ -2065,7 +2066,7 @@ static int vcn_v1_0_validate_bo(struct amdgpu_cs_parser *parser,
 		return -EINVAL;
 	}
 
-	mapping = amdgpu_vm_bo_lookup_mapping(vm, addr/AMDGPU_GPU_PAGE_SIZE);
+	mapping = amdgpu_vm_bo_lookup_mapping(vm, addr);
 	if (!mapping || !mapping->bo_va || !mapping->bo_va->base.bo)
 		return -EINVAL;
 
