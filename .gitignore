@@ -1,0 +1,11 @@
+*.cmd
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.o
+Module.symvers
+modules.order
+.modules.order.cmd
+tests/ntsync
+/.tmp_versions/
