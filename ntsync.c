@@ -23,11 +23,18 @@
 #include <uapi/linux/ntsync.h>
 
 #define NTSYNC_NAME	"ntsync"
+#define NTSYNC_IOCP_MAX_DEPTH	65536
 
 enum ntsync_type {
 	NTSYNC_TYPE_SEM,
 	NTSYNC_TYPE_MUTEX,
 	NTSYNC_TYPE_EVENT,
+	NTSYNC_TYPE_IOCP,
+};
+
+struct ntsync_iocp_entry {
+	struct list_head node;
+	struct ntsync_iocp_packet packet;
 };
 
 /*
@@ -67,6 +74,17 @@ struct ntsync_obj {
 			bool manual;
 			bool signaled;
 		} event;
+		struct {
+			struct list_head queue;
+			/* Blocking removers are served in LIFO order. */
+			struct list_head remove_waiters;
+			struct mutex remove_lock;
+			__u32 concurrency;
+			__u64 generation;
+			__u32 depth;
+			atomic_t pending;
+			bool shutdown;
+		} iocp;
 	} u;
 
 	/*
@@ -116,6 +134,7 @@ struct ntsync_q {
 	bool all;
 	bool ownerdead;
 	__u32 count;
+	struct ntsync_iocp_entry *iocp_entry;
 	struct ntsync_q_entry entries[];
 };
 
@@ -241,6 +260,8 @@ static bool is_signaled(struct ntsync_obj *obj, __u32 owner)
 		return obj->u.mutex.count < UINT_MAX;
 	case NTSYNC_TYPE_EVENT:
 		return obj->u.event.signaled;
+	case NTSYNC_TYPE_IOCP:
+		return obj->u.iocp.depth || obj->u.iocp.shutdown;
 	}
 
 	WARN(1, "bad object type %#x\n", obj->type);
@@ -294,6 +315,8 @@ static void try_wake_all(struct ntsync_device *dev, struct ntsync_q *q,
 			case NTSYNC_TYPE_EVENT:
 				if (!obj->u.event.manual)
 					obj->u.event.signaled = false;
+				break;
+			case NTSYNC_TYPE_IOCP:
 				break;
 			}
 		}
@@ -385,6 +408,109 @@ static void try_wake_any_event(struct ntsync_obj *event)
 			wake_up_process(q->task);
 		}
 	}
+}
+
+static void try_wake_any_iocp(struct ntsync_obj *iocp)
+{
+	struct ntsync_q_entry *entry;
+
+	ntsync_assert_held(iocp);
+	lockdep_assert(iocp->type == NTSYNC_TYPE_IOCP);
+
+	list_for_each_entry(entry, &iocp->any_waiters, node) {
+		struct ntsync_q *q = entry->q;
+		int signaled = -1;
+
+		if (!iocp->u.iocp.depth && !iocp->u.iocp.shutdown)
+			break;
+
+		if (atomic_try_cmpxchg(&q->signaled, &signaled, entry->index))
+			wake_up_process(q->task);
+	}
+}
+
+static void dispatch_iocp_packets(struct ntsync_device *dev,
+				  struct ntsync_obj *iocp, bool all)
+{
+	struct ntsync_q_entry *entry, *next;
+
+	ntsync_assert_held(iocp);
+	lockdep_assert(iocp->type == NTSYNC_TYPE_IOCP);
+
+	if (iocp->u.iocp.shutdown) {
+		list_for_each_entry_safe(entry, next,
+					 &iocp->u.iocp.remove_waiters, node) {
+			struct ntsync_q *q = entry->q;
+			int signaled = -1;
+
+			list_del_init(&entry->node);
+			q->iocp_entry = NULL;
+			if (atomic_try_cmpxchg(&q->signaled, &signaled, 0))
+				wake_up_process(q->task);
+		}
+	} else {
+		while (iocp->u.iocp.depth &&
+		       !list_empty(&iocp->u.iocp.remove_waiters)) {
+			struct ntsync_iocp_entry *packet;
+			bool assigned = false;
+
+			packet = list_first_entry(&iocp->u.iocp.queue,
+						  struct ntsync_iocp_entry, node);
+			list_for_each_entry_safe(entry, next,
+						 &iocp->u.iocp.remove_waiters, node) {
+				struct ntsync_q *q = entry->q;
+				int signaled = -1;
+
+				/*
+				 * Keep failed claims off the list; another wake source
+				 * already owns that waiter.
+				 */
+				list_del_init(&entry->node);
+				q->iocp_entry = packet;
+				if (atomic_try_cmpxchg(&q->signaled, &signaled, 0)) {
+					list_del_init(&packet->node);
+					iocp->u.iocp.depth--;
+					wake_up_process(q->task);
+					assigned = true;
+					break;
+				}
+				q->iocp_entry = NULL;
+			}
+			if (!assigned)
+				break;
+		}
+	}
+
+	if (!is_signaled(iocp, 0))
+		return;
+
+	if (all)
+		try_wake_all_obj(dev, iocp);
+	try_wake_any_iocp(iocp);
+}
+
+static void return_iocp_packet(struct ntsync_obj *iocp,
+			       struct ntsync_iocp_entry *entry)
+{
+	struct ntsync_device *dev = iocp->dev;
+	bool discard, all;
+
+	if (!entry)
+		return;
+
+	all = ntsync_lock_obj(dev, iocp);
+	discard = iocp->u.iocp.shutdown;
+	if (!discard) {
+		list_add(&entry->node, &iocp->u.iocp.queue);
+		iocp->u.iocp.depth++;
+		dispatch_iocp_packets(dev, iocp, all);
+	} else {
+		atomic_dec(&iocp->u.iocp.pending);
+	}
+	ntsync_unlock_obj(dev, iocp, all);
+
+	if (discard)
+		kfree(entry);
 }
 
 /*
@@ -652,8 +778,238 @@ static int ntsync_event_read(struct ntsync_obj *event, void __user *argp)
 	return 0;
 }
 
+static int ntsync_iocp_post(struct ntsync_obj *iocp, void __user *argp,
+			    bool internal)
+{
+	struct ntsync_iocp_entry *entry;
+	struct ntsync_device *dev = iocp->dev;
+	bool all;
+	int ret = 0;
+
+	if (iocp->type != NTSYNC_TYPE_IOCP)
+		return -EINVAL;
+
+	entry = kmalloc_obj(*entry, GFP_KERNEL_ACCOUNT);
+	if (!entry)
+		return -ENOMEM;
+	if (copy_from_user(&entry->packet, argp, sizeof(entry->packet))) {
+		kfree(entry);
+		return -EFAULT;
+	}
+	if (entry->packet.pad) {
+		kfree(entry);
+		return -EINVAL;
+	}
+
+	all = ntsync_lock_obj(dev, iocp);
+	if (iocp->u.iocp.shutdown) {
+		ret = -ESHUTDOWN;
+	} else if (!internal && atomic_read(&iocp->u.iocp.pending) >=
+		   NTSYNC_IOCP_MAX_DEPTH) {
+		ret = -ENOSPC;
+	} else {
+		list_add_tail(&entry->node, &iocp->u.iocp.queue);
+		iocp->u.iocp.depth++;
+		atomic_inc(&iocp->u.iocp.pending);
+		dispatch_iocp_packets(dev, iocp, all);
+	}
+	ntsync_unlock_obj(dev, iocp, all);
+
+	if (ret)
+		kfree(entry);
+	return ret;
+}
+
+static int ntsync_iocp_remove_packets(struct ntsync_obj *iocp,
+				      struct ntsync_iocp_packet __user *user_packets,
+				      __u32 count, __u32 __user *user_written,
+				      struct ntsync_iocp_entry **assigned,
+				      __u64 generation)
+{
+	struct ntsync_iocp_packet stack_packet;
+	struct ntsync_iocp_packet *packets = &stack_packet;
+	struct ntsync_iocp_entry *assigned_entry = assigned ? *assigned : NULL;
+	struct ntsync_iocp_entry *entry, *next;
+	struct ntsync_device *dev = iocp->dev;
+	LIST_HEAD(reserved);
+	__u32 i, written = 0;
+	bool all;
+	int ret = 0;
+
+	if (iocp->type != NTSYNC_TYPE_IOCP)
+		return -EINVAL;
+	if (!count || count > NTSYNC_IOCP_MAX_REMOVE)
+		return -EINVAL;
+
+	if (count > 1) {
+		packets = kcalloc(count, sizeof(*packets), GFP_KERNEL_ACCOUNT);
+		if (!packets) {
+			return_iocp_packet(iocp, assigned_entry);
+			if (assigned)
+				*assigned = NULL;
+			return -ENOMEM;
+		}
+	}
+
+	ret = mutex_lock_killable(&iocp->u.iocp.remove_lock);
+	if (ret) {
+		return_iocp_packet(iocp, assigned_entry);
+		if (assigned)
+			*assigned = NULL;
+		goto out;
+	}
+
+	all = ntsync_lock_obj(dev, iocp);
+	if (generation && generation != iocp->u.iocp.generation) {
+		ret = -ECANCELED;
+	} else if (assigned_entry) {
+		packets[written++] = assigned_entry->packet;
+		list_add_tail(&assigned_entry->node, &reserved);
+		if (assigned)
+			*assigned = NULL;
+	}
+	if (!ret && !written && iocp->u.iocp.shutdown) {
+		ret = -ECANCELED;
+	} else if (!ret && !written && !iocp->u.iocp.depth) {
+		ret = -EAGAIN;
+	} else if (!ret && !iocp->u.iocp.shutdown && written < count) {
+		__u32 queued = min(count - written, iocp->u.iocp.depth);
+
+		i = written;
+		list_for_each_entry_safe(entry, next, &iocp->u.iocp.queue, node) {
+			packets[i++] = entry->packet;
+			list_move_tail(&entry->node, &reserved);
+			if (i == written + queued)
+				break;
+		}
+		iocp->u.iocp.depth -= queued;
+		written += queued;
+	}
+	ntsync_unlock_obj(dev, iocp, all);
+
+	if (!ret && copy_to_user(user_packets, packets,
+				 array_size(written, sizeof(*packets))))
+		ret = -EFAULT;
+	if (!ret && user_written && put_user(written, user_written))
+		ret = -EFAULT;
+
+	if (ret && written) {
+		all = ntsync_lock_obj(dev, iocp);
+		if (!iocp->u.iocp.shutdown) {
+			list_splice_init(&reserved, &iocp->u.iocp.queue);
+			iocp->u.iocp.depth += written;
+			dispatch_iocp_packets(dev, iocp, all);
+		} else {
+			atomic_sub(written, &iocp->u.iocp.pending);
+		}
+		ntsync_unlock_obj(dev, iocp, all);
+	} else if (written)
+		atomic_sub(written, &iocp->u.iocp.pending);
+
+	mutex_unlock(&iocp->u.iocp.remove_lock);
+
+out:
+	list_for_each_entry_safe(entry, next, &reserved, node)
+		kfree(entry);
+	if (packets != &stack_packet)
+		kfree(packets);
+	return ret;
+}
+
+static int ntsync_iocp_remove(struct ntsync_obj *iocp, void __user *argp)
+{
+	return ntsync_iocp_remove_packets(iocp, argp, 1, NULL, NULL, 0);
+}
+
+static int ntsync_iocp_read(struct ntsync_obj *iocp, void __user *argp)
+{
+	struct ntsync_iocp_info info;
+	bool all;
+
+	if (iocp->type != NTSYNC_TYPE_IOCP)
+		return -EINVAL;
+
+	all = ntsync_lock_obj(iocp->dev, iocp);
+	info.concurrency = iocp->u.iocp.concurrency;
+	info.depth = iocp->u.iocp.depth;
+	ntsync_unlock_obj(iocp->dev, iocp, all);
+
+	if (copy_to_user(argp, &info, sizeof(info)))
+		return -EFAULT;
+	return 0;
+}
+
+static int ntsync_iocp_shutdown(struct ntsync_obj *iocp)
+{
+	struct ntsync_iocp_entry *entry, *next;
+	struct ntsync_device *dev = iocp->dev;
+	LIST_HEAD(removed);
+	bool all;
+
+	if (iocp->type != NTSYNC_TYPE_IOCP)
+		return -EINVAL;
+
+	all = ntsync_lock_obj(dev, iocp);
+	iocp->u.iocp.shutdown = true;
+	list_splice_init(&iocp->u.iocp.queue, &removed);
+	atomic_sub(iocp->u.iocp.depth, &iocp->u.iocp.pending);
+	iocp->u.iocp.depth = 0;
+	dispatch_iocp_packets(dev, iocp, all);
+	ntsync_unlock_obj(dev, iocp, all);
+
+	list_for_each_entry_safe(entry, next, &removed, node)
+		kfree(entry);
+	return 0;
+}
+
+static int ntsync_iocp_abandon(struct ntsync_obj *iocp, void __user *argp)
+{
+	struct ntsync_iocp_abandon_args args;
+	struct ntsync_q_entry *entry, *next;
+	struct ntsync_device *dev = iocp->dev;
+	bool all;
+	int ret = 0;
+
+	if (iocp->type != NTSYNC_TYPE_IOCP)
+		return -EINVAL;
+	if (copy_from_user(&args, argp, sizeof(args)))
+		return -EFAULT;
+	if (!args.generation)
+		return -EINVAL;
+
+	all = ntsync_lock_obj(dev, iocp);
+	if (iocp->u.iocp.shutdown ||
+	    args.generation != iocp->u.iocp.generation) {
+		ret = -ECANCELED;
+	} else {
+		if (!++iocp->u.iocp.generation)
+			++iocp->u.iocp.generation;
+		list_for_each_entry_safe(entry, next,
+					 &iocp->u.iocp.remove_waiters, node) {
+			struct ntsync_q *q = entry->q;
+			int signaled = -1;
+
+			list_del_init(&entry->node);
+			q->iocp_entry = NULL;
+			if (atomic_try_cmpxchg(&q->signaled, &signaled, 0))
+				wake_up_process(q->task);
+		}
+	}
+	ntsync_unlock_obj(dev, iocp, all);
+
+	return ret;
+}
+
 static void ntsync_free_obj(struct ntsync_obj *obj)
 {
+	if (obj->type == NTSYNC_TYPE_IOCP) {
+		struct ntsync_iocp_entry *entry, *next;
+
+		list_for_each_entry_safe(entry, next, &obj->u.iocp.queue, node) {
+			list_del(&entry->node);
+			kfree(entry);
+		}
+	}
 	fput(obj->dev->file);
 	kfree(obj);
 }
@@ -663,6 +1019,9 @@ static int ntsync_obj_release(struct inode *inode, struct file *file)
 	ntsync_free_obj(file->private_data);
 	return 0;
 }
+
+static int ntsync_iocp_remove_batch(struct ntsync_obj *iocp,
+				     void __user *argp);
 
 static long ntsync_obj_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long parm)
@@ -689,6 +1048,20 @@ static long ntsync_obj_ioctl(struct file *file, unsigned int cmd,
 		return ntsync_event_set(obj, argp, true);
 	case NTSYNC_IOC_EVENT_READ:
 		return ntsync_event_read(obj, argp);
+	case NTSYNC_IOC_IOCP_POST:
+		return ntsync_iocp_post(obj, argp, false);
+	case NTSYNC_IOC_IOCP_POST_INTERNAL:
+		return ntsync_iocp_post(obj, argp, true);
+	case NTSYNC_IOC_IOCP_REMOVE:
+		return ntsync_iocp_remove(obj, argp);
+	case NTSYNC_IOC_IOCP_READ:
+		return ntsync_iocp_read(obj, argp);
+	case NTSYNC_IOC_IOCP_REMOVE_BATCH:
+		return ntsync_iocp_remove_batch(obj, argp);
+	case NTSYNC_IOC_IOCP_SHUTDOWN:
+		return ntsync_iocp_shutdown(obj);
+	case NTSYNC_IOC_IOCP_ABANDON:
+		return ntsync_iocp_abandon(obj, argp);
 	default:
 		return -ENOIOCTLCMD;
 	}
@@ -799,6 +1172,34 @@ static int ntsync_create_event(struct ntsync_device *dev, void __user *argp)
 	return fd;
 }
 
+static int ntsync_create_iocp(struct ntsync_device *dev, void __user *argp)
+{
+	struct ntsync_iocp_args args;
+	struct ntsync_obj *iocp;
+	int fd;
+
+	if (copy_from_user(&args, argp, sizeof(args)))
+		return -EFAULT;
+	if (args.version != NTSYNC_IOCP_VERSION)
+		return -EINVAL;
+
+	iocp = ntsync_alloc_obj(dev, NTSYNC_TYPE_IOCP);
+	if (!iocp)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&iocp->u.iocp.queue);
+	INIT_LIST_HEAD(&iocp->u.iocp.remove_waiters);
+	mutex_init(&iocp->u.iocp.remove_lock);
+	iocp->u.iocp.concurrency = args.concurrency;
+	iocp->u.iocp.generation = NTSYNC_IOCP_INITIAL_GENERATION;
+	atomic_set(&iocp->u.iocp.pending, 0);
+	iocp->u.iocp.shutdown = false;
+	fd = ntsync_obj_get_fd(iocp);
+	if (fd < 0)
+		ntsync_free_obj(iocp);
+
+	return fd;
+}
+
 static struct ntsync_obj *get_obj(struct ntsync_device *dev, int fd)
 {
 	struct file *file = fget(fd);
@@ -858,6 +1259,149 @@ static int ntsync_schedule(const struct ntsync_q *q, const struct ntsync_wait_ar
 	return ret;
 }
 
+static int ntsync_iocp_wait(struct ntsync_obj *iocp,
+			    struct ntsync_obj *alert,
+			    const struct ntsync_iocp_remove_args *args,
+			    struct ntsync_iocp_entry **packet)
+{
+	struct ntsync_wait_args wait_args = {
+		.timeout = args->timeout,
+		.flags = args->flags,
+	};
+	struct ntsync_device *dev = iocp->dev;
+	struct ntsync_q *q;
+	__u32 count = alert ? 2 : 1;
+	int signaled, ret;
+	bool all;
+
+	q = kmalloc_flex(*q, entries, count);
+	if (!q)
+		return -ENOMEM;
+
+	q->task = current;
+	q->owner = 0;
+	atomic_set(&q->signaled, -1);
+	q->all = false;
+	q->ownerdead = false;
+	q->count = count;
+	q->iocp_entry = NULL;
+	q->entries[0].q = q;
+	q->entries[0].obj = iocp;
+	q->entries[0].index = 0;
+	if (alert) {
+		q->entries[1].q = q;
+		q->entries[1].obj = alert;
+		q->entries[1].index = 1;
+	}
+
+	INIT_LIST_HEAD(&q->entries[0].node);
+	all = ntsync_lock_obj(dev, iocp);
+	if (iocp->u.iocp.shutdown ||
+	    args->generation != iocp->u.iocp.generation) {
+		ntsync_unlock_obj(dev, iocp, all);
+		kfree(q);
+		return -ECANCELED;
+	}
+	/* Wine completion ports wake the most recently associated remover. */
+	list_add(&q->entries[0].node, &iocp->u.iocp.remove_waiters);
+	dispatch_iocp_packets(dev, iocp, all);
+	ntsync_unlock_obj(dev, iocp, all);
+
+	if (alert) {
+		INIT_LIST_HEAD(&q->entries[1].node);
+		all = ntsync_lock_obj(dev, alert);
+		list_add_tail(&q->entries[1].node, &alert->any_waiters);
+		if (atomic_read(&q->signaled) == -1)
+			try_wake_any_event(alert);
+		ntsync_unlock_obj(dev, alert, all);
+	}
+
+	ret = ntsync_schedule(q, &wait_args);
+
+	all = ntsync_lock_obj(dev, iocp);
+	if (!list_empty(&q->entries[0].node))
+		list_del_init(&q->entries[0].node);
+	signaled = atomic_read(&q->signaled);
+	*packet = q->iocp_entry;
+	ntsync_unlock_obj(dev, iocp, all);
+
+	if (alert) {
+		all = ntsync_lock_obj(dev, alert);
+		if (!list_empty(&q->entries[1].node))
+			list_del_init(&q->entries[1].node);
+		ntsync_unlock_obj(dev, alert, all);
+	}
+
+	if (signaled != -1)
+		ret = signaled;
+	else if (!ret)
+		ret = -ETIMEDOUT;
+
+	kfree(q);
+	return ret;
+}
+
+static int ntsync_iocp_remove_batch(struct ntsync_obj *iocp,
+				     void __user *argp)
+{
+	struct ntsync_iocp_remove_args __user *user_args = argp;
+	struct ntsync_iocp_remove_args args;
+	struct ntsync_iocp_entry *assigned = NULL;
+	struct ntsync_obj *alert = NULL;
+	int ret;
+
+	if (iocp->type != NTSYNC_TYPE_IOCP)
+		return -EINVAL;
+	if (copy_from_user(&args, argp, sizeof(args)))
+		return -EFAULT;
+	if (!args.count || args.count > NTSYNC_IOCP_MAX_REMOVE ||
+	    (args.flags & ~NTSYNC_WAIT_REALTIME))
+		return -EINVAL;
+	if (!args.generation) {
+		bool all = ntsync_lock_obj(iocp->dev, iocp);
+
+		args.generation = iocp->u.iocp.generation;
+		ntsync_unlock_obj(iocp->dev, iocp, all);
+	}
+
+	if (args.alert) {
+		alert = get_obj(iocp->dev, args.alert);
+		if (!alert || alert->type != NTSYNC_TYPE_EVENT) {
+			if (alert)
+				put_obj(alert);
+			return -EINVAL;
+		}
+	}
+
+	if (put_user(0, &user_args->written)) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	for (;;) {
+		ret = ntsync_iocp_remove_packets(iocp,
+				u64_to_user_ptr(args.packets), args.count,
+				&user_args->written, &assigned,
+				args.generation);
+		if (ret != -EAGAIN)
+			break;
+
+		ret = ntsync_iocp_wait(iocp, alert, &args, &assigned);
+		if (ret < 0)
+			break;
+		if (ret == 1) {
+			ret = 0;
+			break;
+		}
+	}
+
+out:
+	return_iocp_packet(iocp, assigned);
+	if (alert)
+		put_obj(alert);
+	return ret;
+}
+
 /*
  * Allocate and initialize the ntsync_q structure, but do not queue us yet.
  */
@@ -899,6 +1443,7 @@ static int setup_wait(struct ntsync_device *dev,
 	q->all = all;
 	q->ownerdead = false;
 	q->count = count;
+	q->iocp_entry = NULL;
 
 	for (i = 0; i < total_count; i++) {
 		struct ntsync_q_entry *entry = &q->entries[i];
@@ -943,6 +1488,9 @@ static void try_wake_any_obj(struct ntsync_obj *obj)
 		break;
 	case NTSYNC_TYPE_EVENT:
 		try_wake_any_event(obj);
+		break;
+	case NTSYNC_TYPE_IOCP:
+		try_wake_any_iocp(obj);
 		break;
 	}
 }
@@ -1184,6 +1732,8 @@ static long ntsync_char_ioctl(struct file *file, unsigned int cmd,
 		return ntsync_create_mutex(dev, argp);
 	case NTSYNC_IOC_CREATE_SEM:
 		return ntsync_create_sem(dev, argp);
+	case NTSYNC_IOC_CREATE_IOCP:
+		return ntsync_create_iocp(dev, argp);
 	case NTSYNC_IOC_WAIT_ALL:
 		return ntsync_wait_all(dev, argp);
 	case NTSYNC_IOC_WAIT_ANY:

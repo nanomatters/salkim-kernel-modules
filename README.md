@@ -15,6 +15,14 @@ NT I/O completion ports while preserving the existing synchronization API.
 The imported source, UAPI, documentation, and tests are kept with their
 upstream licenses.
 
+## IOCP development
+
+The current development interface provides creation, FIFO posting,
+nonblocking and blocking batched removal, absolute timeouts, alert events,
+generation based removal abandonment, terminal cancellation, depth queries,
+and generic ntsync wait integration. See `Documentation/iocp.rst` for its
+semantics and remaining work.
+
 ## Build
 
 The running kernel's build tree is used by default:
