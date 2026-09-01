@@ -169,3 +169,6 @@ drm/amd/display: Exit self-refresh before full updates.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/c30b9813bce1d9e2361dc80ef40208b045bde8ca
 drm/amd/display: Limit SST DSC bandwidth on USB4.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/cd53dcd2a7d733162d8e23472d65995ca0b58902
+drm/amd/display: Limit MST DSC bandwidth on USB4.
