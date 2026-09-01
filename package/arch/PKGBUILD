@@ -1,0 +1,48 @@
+# Maintainer: Erhan Bilgili
+
+_module=ntsync-iocp
+pkgname="$_module-dkms"
+pkgver=r2.g4e144a19d9f9
+pkgrel=1
+pkgdesc='Wineland ntsync kernel module with I/O completion port support'
+arch=(any)
+url='https://github.com/nanomatters/ntsync-iocp'
+license=(GPL-2.0-only
+         'GPL-2.0-only WITH Linux-syscall-note')
+depends=(dkms)
+makedepends=(git)
+provides=(NTSYNC-MODULE)
+_source_dir="$startdir/../.."
+source=()
+sha256sums=()
+
+pkgver() {
+  printf 'r%s.g%s' \
+    "$(git -C "$_source_dir" rev-list --count HEAD)" \
+    "$(git -C "$_source_dir" rev-parse --short=12 HEAD)"
+}
+
+package() {
+  local dkms_source="$pkgdir/usr/src/$_module-$pkgver"
+
+  install -Dm644 "$_source_dir/Makefile" "$dkms_source/Makefile"
+  install -Dm644 "$_source_dir/ntsync.c" "$dkms_source/ntsync.c"
+  install -Dm644 "$_source_dir/include/uapi/linux/ntsync.h" \
+    "$dkms_source/include/uapi/linux/ntsync.h"
+
+  printf '%s\n' \
+    'PACKAGE_NAME="ntsync-iocp"' \
+    "PACKAGE_VERSION=\"$pkgver\"" \
+    'BUILT_MODULE_NAME[0]="ntsync"' \
+    'BUILT_MODULE_LOCATION[0]="."' \
+    'DEST_MODULE_LOCATION[0]="/updates/dkms"' \
+    'AUTOINSTALL="yes"' \
+    > "$dkms_source/dkms.conf"
+
+  install -Dm644 "$_source_dir/README.md" \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$_source_dir/Documentation/ntsync.rst" \
+    "$pkgdir/usr/share/doc/$pkgname/ntsync.rst"
+  install -Dm644 "$_source_dir/Documentation/iocp.rst" \
+    "$pkgdir/usr/share/doc/$pkgname/iocp.rst"
+}

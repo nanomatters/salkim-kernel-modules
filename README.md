@@ -23,6 +23,46 @@ generation based removal abandonment, terminal cancellation, depth queries,
 and generic ntsync wait integration. See `Documentation/iocp.rst` for its
 semantics and remaining work.
 
+## Arch Linux and CachyOS package
+
+Install the headers for every kernel that should build the module. For the
+standard CachyOS kernel:
+
+```sh
+sudo pacman -S --needed base-devel linux-cachyos-headers
+```
+
+Other kernel variants need their corresponding headers package. Build the
+local `ntsync-iocp-dkms` package from the repository root with:
+
+```sh
+cd package/arch
+makepkg -s
+```
+
+Install the resulting package with:
+
+```sh
+sudo pacman -U ./ntsync-iocp-dkms-*.pkg.tar.zst
+```
+
+DKMS builds the module for each installed kernel that has matching headers.
+On Arch Linux and CachyOS, the module is installed under `updates/dkms`, which
+takes precedence over the in-tree `ntsync` module. Confirm the selected module
+for the running kernel with:
+
+```sh
+modinfo -n ntsync
+```
+
+Installation does not replace a module that is already loaded. Reboot, or stop
+all processes using ntsync before reloading it:
+
+```sh
+sudo modprobe -r ntsync
+sudo modprobe ntsync
+```
+
 ## Build
 
 The running kernel's build tree is used by default:
