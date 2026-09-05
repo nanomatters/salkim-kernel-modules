@@ -1475,6 +1475,166 @@ TEST(iocp_signal_restart)
 	close(fd);
 }
 
+TEST(iocp_copy_does_not_block)
+{
+	enum { COPY_POLL, COPY_TIMEOUT, COPY_ALERT, COPY_SIGNAL,
+	       COPY_ABANDON, COPY_SHUTDOWN, COPY_POST, COPY_CASE_COUNT };
+	static const char * const names[] = {"poll", "timeout", "alert", "signal",
+					    "abandon", "shutdown", "post"};
+	struct ntsync_iocp_args create_args = {.version = NTSYNC_IOCP_VERSION};
+	struct uffdio_api api = {.api = UFFD_API};
+	struct sigaction action = {.sa_handler = iocp_signal_handler}, old_action;
+	long page_size = sysconf(_SC_PAGESIZE);
+	unsigned int mode;
+	int fd, uffd, ret;
+
+	uffd = syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+	if (uffd < 0)
+		SKIP(return, "userfaultfd kernel faults are unavailable");
+	ret = ioctl(uffd, UFFDIO_API, &api);
+	ASSERT_EQ(0, ret);
+	ASSERT_LT(0, page_size);
+	fd = open("/dev/ntsync", O_CLOEXEC | O_RDONLY);
+	ASSERT_LE(0, fd);
+	sigemptyset(&action.sa_mask);
+	ret = sigaction(SIGUSR1, &action, &old_action);
+	ASSERT_EQ(0, ret);
+
+	for (mode = 0; mode < COPY_CASE_COUNT; mode++) {
+		struct ntsync_iocp_remove_args copy_args = {0}, remove_args = {0};
+		struct ntsync_iocp_packet packet = {.key = 1}, received;
+		struct ntsync_event_args event_args = {.signaled = 1};
+		struct iocp_wait_args copy_thread_args;
+		struct wait_args wait_thread_args;
+		struct ntsync_iocp_info info;
+		struct uffdio_register reg = {0};
+		struct uffdio_copy copy = {0};
+		struct uffd_msg msg;
+		struct pollfd pollfd = {.fd = uffd, .events = POLLIN};
+		void *fault_page, *source_page;
+		pthread_t copy_thread, waiter;
+		__u32 signaled, manual;
+		int iocp, event = -1, wait_ret;
+
+		TH_LOG("Checking %s during a stalled copy", names[mode]);
+		iocp = ioctl(fd, NTSYNC_IOC_CREATE_IOCP, &create_args);
+		ASSERT_LE(0, iocp);
+		fault_page = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+				  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		ASSERT_TRUE(fault_page != MAP_FAILED);
+		source_page = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+				   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		ASSERT_TRUE(source_page != MAP_FAILED);
+		memset(source_page, 0, page_size);
+		reg.range.start = (uintptr_t)fault_page;
+		reg.range.len = page_size;
+		reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+		ret = ioctl(uffd, UFFDIO_REGISTER, &reg);
+		ASSERT_EQ(0, ret);
+
+		ret = ioctl(iocp, NTSYNC_IOC_IOCP_POST, &packet);
+		ASSERT_EQ(0, ret);
+		copy_args.packets = (uintptr_t)fault_page;
+		copy_args.count = 1;
+		copy_args.timeout = ~(__u64)0;
+		copy_thread_args.fd = iocp;
+		copy_thread_args.args = &copy_args;
+		ret = pthread_create(&copy_thread, NULL, iocp_wait_thread, &copy_thread_args);
+		ASSERT_EQ(0, ret);
+		ret = poll(&pollfd, 1, 1000);
+		ASSERT_EQ(1, ret);
+		ret = read(uffd, &msg, sizeof(msg));
+		ASSERT_EQ((int)sizeof(msg), ret);
+		ASSERT_EQ(UFFD_EVENT_PAGEFAULT, msg.event);
+
+		remove_args.packets = (uintptr_t)&received;
+		remove_args.count = 1;
+		remove_args.timeout = mode == COPY_TIMEOUT ? get_abs_timeout(50) : ~(__u64)0;
+		remove_args.generation = NTSYNC_IOCP_INITIAL_GENERATION;
+		if (mode == COPY_ALERT) {
+			event = ioctl(fd, NTSYNC_IOC_CREATE_EVENT, &event_args);
+			ASSERT_LE(0, event);
+			remove_args.alert = event;
+		}
+		wait_thread_args.fd = iocp;
+		wait_thread_args.request = mode == COPY_POLL ?
+				NTSYNC_IOC_IOCP_REMOVE : NTSYNC_IOC_IOCP_REMOVE_BATCH;
+		wait_thread_args.args = mode == COPY_POLL ?
+				(void *)&received : (void *)&remove_args;
+		ret = pthread_create(&waiter, NULL, wait_thread, &wait_thread_args);
+		ASSERT_EQ(0, ret);
+
+		if (mode >= COPY_SIGNAL) {
+			ret = wait_for_thread(waiter, 100);
+			ASSERT_EQ(ETIMEDOUT, ret);
+			if (mode == COPY_SIGNAL) {
+				ret = pthread_kill(waiter, SIGUSR1);
+			} else if (mode == COPY_ABANDON) {
+				struct ntsync_iocp_abandon_args args = {
+					.generation = NTSYNC_IOCP_INITIAL_GENERATION,
+				};
+
+				ret = ioctl(iocp, NTSYNC_IOC_IOCP_ABANDON, &args);
+			} else if (mode == COPY_SHUTDOWN) {
+				ret = ioctl(iocp, NTSYNC_IOC_IOCP_SHUTDOWN);
+			} else {
+				packet.key = 2;
+				ret = ioctl(iocp, NTSYNC_IOC_IOCP_POST, &packet);
+			}
+			ASSERT_EQ(0, ret);
+		}
+
+		/* Record progress before resolving the other caller's page fault. */
+		wait_ret = wait_for_thread(waiter, 1000);
+		copy.dst = (uintptr_t)fault_page;
+		copy.src = (uintptr_t)source_page;
+		copy.len = page_size;
+		ret = ioctl(uffd, UFFDIO_COPY, &copy);
+		ASSERT_EQ(0, ret);
+		ASSERT_EQ(page_size, copy.copy);
+		ret = wait_for_thread(copy_thread, 1000);
+		ASSERT_EQ(0, ret);
+		ASSERT_EQ(0, copy_thread_args.ret);
+		ASSERT_EQ(1, copy_args.written);
+		ASSERT_EQ(1, ((struct ntsync_iocp_packet *)fault_page)->key);
+		if (wait_ret) {
+			ret = wait_for_thread(waiter, 1000);
+			ASSERT_EQ(0, ret);
+		}
+		EXPECT_EQ(0, wait_ret);
+		if (mode == COPY_ALERT || mode == COPY_POST) {
+			EXPECT_EQ(0, wait_thread_args.ret);
+			EXPECT_EQ(mode == COPY_POST ? 1 : 0, remove_args.written);
+			if (mode == COPY_POST) {
+				EXPECT_EQ(2, received.key);
+			} else {
+				ASSERT_EQ(0, read_event_state(event, &signaled, &manual));
+				EXPECT_EQ(0, signaled);
+			}
+		} else {
+			int err = mode == COPY_POLL ? EAGAIN : mode == COPY_TIMEOUT ?
+				  ETIMEDOUT : mode == COPY_SIGNAL ? EINTR : ECANCELED;
+
+			EXPECT_EQ(-1, wait_thread_args.ret);
+			EXPECT_EQ(err, wait_thread_args.err);
+			EXPECT_EQ(0, remove_args.written);
+		}
+		ret = ioctl(iocp, NTSYNC_IOC_IOCP_READ, &info);
+		ASSERT_EQ(0, ret);
+		EXPECT_EQ(0, info.depth);
+		if (event >= 0)
+			close(event);
+		close(iocp);
+		munmap(fault_page, page_size);
+		munmap(source_page, page_size);
+	}
+
+	ret = sigaction(SIGUSR1, &old_action, NULL);
+	EXPECT_EQ(0, ret);
+	close(uffd);
+	close(fd);
+}
+
 TEST(iocp_killed_waiter)
 {
 	struct ntsync_iocp_remove_args remove_args = {0};
@@ -2091,10 +2251,18 @@ static void *iocp_race_post(void *arg)
 	return NULL;
 }
 
+enum iocp_rollback_mode {
+	IOCP_ROLLBACK_FAULT,
+	IOCP_ROLLBACK_ABANDON,
+	IOCP_ROLLBACK_MIXED,
+};
+
 static void test_iocp_rollback_order(struct __test_metadata *_metadata,
-				   bool abandon)
+				   enum iocp_rollback_mode mode)
 {
 	struct ntsync_iocp_args create_args = {.version = NTSYNC_IOCP_VERSION};
+	bool abandon = mode == IOCP_ROLLBACK_ABANDON;
+	bool mixed = mode == IOCP_ROLLBACK_MIXED;
 	unsigned int iteration, checked = 0, reordered = 0;
 	int fd;
 
@@ -2121,7 +2289,8 @@ static void test_iocp_rollback_order(struct __test_metadata *_metadata,
 		for (i = 0; i < 2; i++) {
 			/* Exercise both single-packet and batched copy rollback. */
 			remove_args[i].count = 1 + (iteration & 1);
-			remove_args[i].packets = abandon ? (uintptr_t)packets[i] : 0;
+			remove_args[i].packets = abandon || (mixed && i) ?
+						(uintptr_t)packets[i] : 0;
 			remove_args[i].timeout = get_abs_timeout(5000);
 			remove_args[i].generation = NTSYNC_IOCP_INITIAL_GENERATION;
 			remove_args[i].written = 0xdeadbeef;
@@ -2153,8 +2322,10 @@ static void test_iocp_rollback_order(struct __test_metadata *_metadata,
 		for (i = 0; i < 2; i++) {
 			ret = wait_for_thread(threads[i], 1000);
 			ASSERT_EQ(0, ret);
-			if (abandon && !wait_args[i].ret) {
-				/* A removal may finish before abandonment. */
+			if (mixed && i)
+				ASSERT_EQ(0, wait_args[i].ret);
+			if ((abandon || (mixed && i)) && !wait_args[i].ret) {
+				/* Check successful batches as well as the restored queue. */
 				ASSERT_GE(remove_args[i].written, 1);
 				ASSERT_LE(remove_args[i].written, remove_args[i].count);
 				for (j = 0; j < remove_args[i].written; j++) {
@@ -2162,6 +2333,8 @@ static void test_iocp_rollback_order(struct __test_metadata *_metadata,
 					ASSERT_LE(packets[i][j].key, 3);
 					ASSERT_FALSE(seen[packets[i][j].key]);
 					seen[packets[i][j].key] = true;
+					if (j && packets[i][j].key < packets[i][j - 1].key)
+						reordered++;
 				}
 				removed += remove_args[i].written;
 			} else {
@@ -2176,7 +2349,7 @@ static void test_iocp_rollback_order(struct __test_metadata *_metadata,
 		ret = ioctl(iocp, NTSYNC_IOC_IOCP_READ, &info);
 		ASSERT_EQ(0, ret);
 		ASSERT_EQ(3 - removed, info.depth);
-		if (!removed)
+		if (!removed || (mixed && remove_args[1].written == 2))
 			checked++;
 		for (i = 0; i < info.depth; i++) {
 			ret = ioctl(iocp, NTSYNC_IOC_IOCP_REMOVE, &packet);
@@ -2192,7 +2365,7 @@ static void test_iocp_rollback_order(struct __test_metadata *_metadata,
 		close(iocp);
 	}
 
-	/* Neither failed removal may change the remaining packets' order. */
+	/* Failed removals must not reorder the queue or a successful batch. */
 	EXPECT_GT(checked, 0);
 	EXPECT_EQ(0, reordered);
 	close(fd);
@@ -2200,12 +2373,17 @@ static void test_iocp_rollback_order(struct __test_metadata *_metadata,
 
 TEST(iocp_fault_rollback_order)
 {
-	test_iocp_rollback_order(_metadata, false);
+	test_iocp_rollback_order(_metadata, IOCP_ROLLBACK_FAULT);
 }
 
 TEST(iocp_abandon_rollback_order)
 {
-	test_iocp_rollback_order(_metadata, true);
+	test_iocp_rollback_order(_metadata, IOCP_ROLLBACK_ABANDON);
+}
+
+TEST(iocp_mixed_rollback_order)
+{
+	test_iocp_rollback_order(_metadata, IOCP_ROLLBACK_MIXED);
 }
 
 #define IOCP_ALERT_RACE_ITERATIONS 100000

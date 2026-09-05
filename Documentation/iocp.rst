@@ -67,10 +67,16 @@ Interface
   removal restarts transparently against the same absolute timeout. Callers
   must handle ``EINTR`` when using non-restarting signal handlers.
 
-  Packet selection, userspace validation, and queue removal are serialized.
-  If either the packet array or ``written`` cannot be copied to userspace, no
-  packet is removed unless the port is concurrently shut down. Concurrent
-  posts may continue while a result is copied.
+  Packet selection and reservation are serialized, but userspace copies do
+  not hold a port lock. Other posts, removals, and waits may proceed while a
+  result is copied. Reserved packets remain unavailable to other removers
+  until the copy succeeds or they are returned; concurrent removals may
+  complete in a different order.
+
+  If either the packet array or ``written`` cannot be copied to userspace,
+  that removal's packets are restored in posting order unless the port is
+  concurrently shut down. A granted packet is merged with any older returned
+  packets before the batch is selected.
 
 ``NTSYNC_IOC_IOCP_READ``
   Returns the configured concurrency value and current queue depth.

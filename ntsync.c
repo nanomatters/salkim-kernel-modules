@@ -79,7 +79,6 @@ struct ntsync_obj {
 			struct list_head queue;
 			/* Blocking removers are served in LIFO order. */
 			struct list_head remove_waiters;
-			struct mutex remove_lock;
 			__u32 concurrency;
 			__u64 generation;
 			__u64 sequence;
@@ -872,20 +871,18 @@ static int ntsync_iocp_remove_packets(struct ntsync_obj *iocp,
 		}
 	}
 
-	ret = mutex_lock_killable(&iocp->u.iocp.remove_lock);
-	if (ret) {
-		return_iocp_packet(iocp, assigned_entry);
-		if (assigned)
-			*assigned = NULL;
-		goto out;
-	}
-
 	all = ntsync_lock_obj(dev, iocp);
 	if (generation && generation != iocp->u.iocp.generation) {
 		ret = -ECANCELED;
 	} else if (assigned_entry) {
-		packets[written++] = assigned_entry->packet;
-		list_add_tail(&assigned_entry->node, &reserved);
+		if (iocp->u.iocp.shutdown) {
+			/* A packet granted before shutdown may still complete. */
+			packets[written++] = assigned_entry->packet;
+			list_add_tail(&assigned_entry->node, &reserved);
+		} else {
+			/* Merge any older rollbacks before selecting this batch. */
+			requeue_iocp_packet(iocp, assigned_entry);
+		}
 		if (assigned)
 			*assigned = NULL;
 	}
@@ -908,6 +905,7 @@ static int ntsync_iocp_remove_packets(struct ntsync_obj *iocp,
 	}
 	ntsync_unlock_obj(dev, iocp, all);
 
+	/* Reservations stay private while faultable userspace copies run. */
 	if (!ret && copy_to_user(user_packets, packets,
 				 array_size(written, sizeof(*packets))))
 		ret = -EFAULT;
@@ -927,9 +925,6 @@ static int ntsync_iocp_remove_packets(struct ntsync_obj *iocp,
 	} else if (written)
 		atomic_sub(written, &iocp->u.iocp.pending);
 
-	mutex_unlock(&iocp->u.iocp.remove_lock);
-
-out:
 	list_for_each_entry_safe(entry, next, &reserved, node)
 		kfree(entry);
 	if (packets != &stack_packet)
@@ -1209,7 +1204,6 @@ static int ntsync_create_iocp(struct ntsync_device *dev, void __user *argp)
 		return -ENOMEM;
 	INIT_LIST_HEAD(&iocp->u.iocp.queue);
 	INIT_LIST_HEAD(&iocp->u.iocp.remove_waiters);
-	mutex_init(&iocp->u.iocp.remove_lock);
 	iocp->u.iocp.concurrency = args.concurrency;
 	iocp->u.iocp.generation = NTSYNC_IOCP_INITIAL_GENERATION;
 	atomic_set(&iocp->u.iocp.pending, 0);
