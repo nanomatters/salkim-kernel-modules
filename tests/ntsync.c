@@ -1109,6 +1109,28 @@ TEST(iocp_remove_batch)
 	EXPECT_EQ(0, remove_args.written);
 	check_event_state(event, 0, 0);
 
+	/* A manual-reset alert must remain pending after repeated removals. */
+	close(event);
+	event_args.manual = true;
+	event_args.signaled = true;
+	event = ioctl(fd, NTSYNC_IOC_CREATE_EVENT, &event_args);
+	ASSERT_LE(0, event);
+	remove_args.alert = event;
+	remove_args.timeout = 0;
+	for (i = 0; i < 2; i++) {
+		ret = ioctl(iocp, NTSYNC_IOC_IOCP_REMOVE_BATCH, &remove_args);
+		EXPECT_EQ(0, ret);
+		EXPECT_EQ(0, remove_args.written);
+		check_event_state(event, 1, 1);
+	}
+	ret = ioctl(event, NTSYNC_IOC_EVENT_RESET, &signaled);
+	EXPECT_EQ(0, ret);
+	ret = ioctl(iocp, NTSYNC_IOC_IOCP_REMOVE_BATCH, &remove_args);
+	EXPECT_EQ(-1, ret);
+	EXPECT_EQ(ETIMEDOUT, errno);
+	EXPECT_EQ(0, remove_args.written);
+	check_event_state(event, 0, 1);
+
 	shutdown_iocp = ioctl(fd, NTSYNC_IOC_CREATE_IOCP, &create_args);
 	ASSERT_LE(0, shutdown_iocp);
 	remove_args.alert = 0;
@@ -2067,6 +2089,90 @@ static void *iocp_race_post(void *arg)
 	args->ret = ioctl(args->fd, NTSYNC_IOC_IOCP_POST, args->packet);
 	args->err = errno;
 	return NULL;
+}
+
+#define IOCP_ALERT_RACE_ITERATIONS 100000
+
+struct iocp_alert_race_args {
+	pthread_barrier_t barrier;
+	int event;
+	int ret;
+};
+
+static void *iocp_race_alert(void *arg)
+{
+	struct iocp_alert_race_args *args = arg;
+	unsigned int i, j;
+	__u32 signaled;
+
+	for (i = 0; i < IOCP_ALERT_RACE_ITERATIONS; i++) {
+		pthread_barrier_wait(&args->barrier);
+		/* Vary the overlap with the remover's timeout cleanup. */
+		for (j = 0; j < (i & 255); j++)
+			atomic_signal_fence(memory_order_seq_cst);
+		args->ret = ioctl(args->event, NTSYNC_IOC_EVENT_SET, &signaled);
+		pthread_barrier_wait(&args->barrier);
+	}
+	return NULL;
+}
+
+TEST(iocp_alert_timeout_race)
+{
+	struct ntsync_iocp_args create_args = {.version = NTSYNC_IOCP_VERSION};
+	struct ntsync_iocp_remove_args remove_args = {0};
+	struct ntsync_event_args event_args = {0};
+	struct ntsync_iocp_packet received;
+	struct iocp_alert_race_args thread_args;
+	unsigned int i, lost = 0;
+	__u32 signaled, manual;
+	pthread_t thread;
+	int fd, iocp, ret, err;
+
+	fd = open("/dev/ntsync", O_CLOEXEC | O_RDONLY);
+	ASSERT_LE(0, fd);
+	iocp = ioctl(fd, NTSYNC_IOC_CREATE_IOCP, &create_args);
+	ASSERT_LE(0, iocp);
+	thread_args.event = ioctl(fd, NTSYNC_IOC_CREATE_EVENT, &event_args);
+	ASSERT_LE(0, thread_args.event);
+	remove_args.packets = (uintptr_t)&received;
+	remove_args.count = 1;
+	remove_args.alert = thread_args.event;
+
+	ret = pthread_barrier_init(&thread_args.barrier, NULL, 2);
+	ASSERT_EQ(0, ret);
+	ret = pthread_create(&thread, NULL, iocp_race_alert, &thread_args);
+	ASSERT_EQ(0, ret);
+
+	for (i = 0; i < IOCP_ALERT_RACE_ITERATIONS; i++) {
+		ret = ioctl(thread_args.event, NTSYNC_IOC_EVENT_RESET, &signaled);
+		ASSERT_EQ(0, ret);
+		remove_args.written = 0xdeadbeef;
+		pthread_barrier_wait(&thread_args.barrier);
+		/* The empty port and expired timeout race only against the alert. */
+		ret = ioctl(iocp, NTSYNC_IOC_IOCP_REMOVE_BATCH, &remove_args);
+		err = errno;
+		pthread_barrier_wait(&thread_args.barrier);
+		ASSERT_EQ(0, thread_args.ret);
+		ASSERT_TRUE(!ret || (ret == -1 && err == ETIMEDOUT));
+		ASSERT_EQ(0, remove_args.written);
+		ASSERT_EQ(0, read_event_state(thread_args.event, &signaled, &manual));
+		ASSERT_EQ(0, manual);
+		if (!ret) {
+			ASSERT_EQ(0, signaled);
+		} else if (!signaled) {
+			lost++;
+		}
+	}
+
+	ret = wait_for_thread(thread, 1000);
+	ASSERT_EQ(0, ret);
+	ret = pthread_barrier_destroy(&thread_args.barrier);
+	EXPECT_EQ(0, ret);
+	/* A timeout must leave an unconsumed alert for the next wait. */
+	EXPECT_EQ(0, lost);
+	close(thread_args.event);
+	close(iocp);
+	close(fd);
 }
 
 TEST(iocp_shutdown_race)

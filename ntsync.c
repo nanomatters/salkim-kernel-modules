@@ -1321,7 +1321,6 @@ static int ntsync_iocp_wait(struct ntsync_obj *iocp,
 	all = ntsync_lock_obj(dev, iocp);
 	if (!list_empty(&q->entries[0].node))
 		list_del_init(&q->entries[0].node);
-	signaled = atomic_read(&q->signaled);
 	*packet = q->iocp_entry;
 	ntsync_unlock_obj(dev, iocp, all);
 
@@ -1332,6 +1331,8 @@ static int ntsync_iocp_wait(struct ntsync_obj *iocp,
 		ntsync_unlock_obj(dev, alert, all);
 	}
 
+	/* An alert can still win until both waiters have been unqueued. */
+	signaled = atomic_read(&q->signaled);
 	if (signaled != -1)
 		ret = signaled;
 	else if (!ret)
