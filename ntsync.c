@@ -35,6 +35,7 @@ enum ntsync_type {
 struct ntsync_iocp_entry {
 	struct list_head node;
 	struct ntsync_iocp_packet packet;
+	__u64 sequence;
 };
 
 /*
@@ -81,6 +82,7 @@ struct ntsync_obj {
 			struct mutex remove_lock;
 			__u32 concurrency;
 			__u64 generation;
+			__u64 sequence;
 			__u32 depth;
 			atomic_t pending;
 			bool shutdown;
@@ -489,6 +491,25 @@ static void dispatch_iocp_packets(struct ntsync_device *dev,
 	try_wake_any_iocp(iocp);
 }
 
+static void requeue_iocp_packet(struct ntsync_obj *iocp,
+				struct ntsync_iocp_entry *entry)
+{
+	struct list_head *pos;
+
+	ntsync_assert_held(iocp);
+
+	/* Concurrent reservations can be returned in any order. */
+	list_for_each(pos, &iocp->u.iocp.queue) {
+		struct ntsync_iocp_entry *queued;
+
+		queued = list_entry(pos, struct ntsync_iocp_entry, node);
+		if ((__s64)(entry->sequence - queued->sequence) < 0)
+			break;
+	}
+	list_move_tail(&entry->node, pos);
+	iocp->u.iocp.depth++;
+}
+
 static void return_iocp_packet(struct ntsync_obj *iocp,
 			       struct ntsync_iocp_entry *entry)
 {
@@ -501,8 +522,7 @@ static void return_iocp_packet(struct ntsync_obj *iocp,
 	all = ntsync_lock_obj(dev, iocp);
 	discard = iocp->u.iocp.shutdown;
 	if (!discard) {
-		list_add(&entry->node, &iocp->u.iocp.queue);
-		iocp->u.iocp.depth++;
+		requeue_iocp_packet(iocp, entry);
 		dispatch_iocp_packets(dev, iocp, all);
 	} else {
 		atomic_dec(&iocp->u.iocp.pending);
@@ -808,6 +828,7 @@ static int ntsync_iocp_post(struct ntsync_obj *iocp, void __user *argp,
 		   NTSYNC_IOCP_MAX_DEPTH) {
 		ret = -ENOSPC;
 	} else {
+		entry->sequence = iocp->u.iocp.sequence++;
 		list_add_tail(&entry->node, &iocp->u.iocp.queue);
 		iocp->u.iocp.depth++;
 		atomic_inc(&iocp->u.iocp.pending);
@@ -896,8 +917,8 @@ static int ntsync_iocp_remove_packets(struct ntsync_obj *iocp,
 	if (ret && written) {
 		all = ntsync_lock_obj(dev, iocp);
 		if (!iocp->u.iocp.shutdown) {
-			list_splice_init(&reserved, &iocp->u.iocp.queue);
-			iocp->u.iocp.depth += written;
+			list_for_each_entry_safe(entry, next, &reserved, node)
+				requeue_iocp_packet(iocp, entry);
 			dispatch_iocp_packets(dev, iocp, all);
 		} else {
 			atomic_sub(written, &iocp->u.iocp.pending);

@@ -2091,6 +2091,123 @@ static void *iocp_race_post(void *arg)
 	return NULL;
 }
 
+static void test_iocp_rollback_order(struct __test_metadata *_metadata,
+				   bool abandon)
+{
+	struct ntsync_iocp_args create_args = {.version = NTSYNC_IOCP_VERSION};
+	unsigned int iteration, checked = 0, reordered = 0;
+	int fd;
+
+	fd = open("/dev/ntsync", O_CLOEXEC | O_RDONLY);
+	ASSERT_LE(0, fd);
+
+	for (iteration = 0; iteration < IOCP_RACE_ITERATIONS; iteration++) {
+		struct ntsync_iocp_remove_args remove_args[2] = {0};
+		struct ntsync_iocp_packet packets[2][2], packet = {0};
+		struct iocp_race_wait_args wait_args[2];
+		struct ntsync_iocp_info info;
+		pthread_barrier_t barrier;
+		pthread_t threads[2];
+		bool seen[4] = {0};
+		unsigned int i, j, removed = 0;
+		__u64 previous = 0;
+		int iocp, ret;
+
+		iocp = ioctl(fd, NTSYNC_IOC_CREATE_IOCP, &create_args);
+		ASSERT_LE(0, iocp);
+		ret = pthread_barrier_init(&barrier, NULL, 3);
+		ASSERT_EQ(0, ret);
+
+		for (i = 0; i < 2; i++) {
+			/* Exercise both single-packet and batched copy rollback. */
+			remove_args[i].count = 1 + (iteration & 1);
+			remove_args[i].packets = abandon ? (uintptr_t)packets[i] : 0;
+			remove_args[i].timeout = get_abs_timeout(5000);
+			remove_args[i].generation = NTSYNC_IOCP_INITIAL_GENERATION;
+			remove_args[i].written = 0xdeadbeef;
+			wait_args[i].barrier = &barrier;
+			wait_args[i].args = &remove_args[i];
+			wait_args[i].fd = iocp;
+			ret = pthread_create(&threads[i], NULL, iocp_race_wait,
+					     &wait_args[i]);
+			ASSERT_EQ(0, ret);
+		}
+
+		pthread_barrier_wait(&barrier);
+		/* Let both removers queue before their reservations race. */
+		usleep(1000);
+		for (i = 1; i <= 3; i++) {
+			packet.key = i;
+			ret = ioctl(iocp, NTSYNC_IOC_IOCP_POST, &packet);
+			ASSERT_EQ(0, ret);
+		}
+		if (abandon) {
+			struct ntsync_iocp_abandon_args args = {
+				.generation = NTSYNC_IOCP_INITIAL_GENERATION,
+			};
+
+			ret = ioctl(iocp, NTSYNC_IOC_IOCP_ABANDON, &args);
+			ASSERT_EQ(0, ret);
+		}
+
+		for (i = 0; i < 2; i++) {
+			ret = wait_for_thread(threads[i], 1000);
+			ASSERT_EQ(0, ret);
+			if (abandon && !wait_args[i].ret) {
+				/* A removal may finish before abandonment. */
+				ASSERT_GE(remove_args[i].written, 1);
+				ASSERT_LE(remove_args[i].written, remove_args[i].count);
+				for (j = 0; j < remove_args[i].written; j++) {
+					ASSERT_GE(packets[i][j].key, 1);
+					ASSERT_LE(packets[i][j].key, 3);
+					ASSERT_FALSE(seen[packets[i][j].key]);
+					seen[packets[i][j].key] = true;
+				}
+				removed += remove_args[i].written;
+			} else {
+				ASSERT_EQ(-1, wait_args[i].ret);
+				ASSERT_EQ(abandon ? ECANCELED : EFAULT, wait_args[i].err);
+				ASSERT_EQ(0, remove_args[i].written);
+			}
+		}
+		ret = pthread_barrier_destroy(&barrier);
+		ASSERT_EQ(0, ret);
+
+		ret = ioctl(iocp, NTSYNC_IOC_IOCP_READ, &info);
+		ASSERT_EQ(0, ret);
+		ASSERT_EQ(3 - removed, info.depth);
+		if (!removed)
+			checked++;
+		for (i = 0; i < info.depth; i++) {
+			ret = ioctl(iocp, NTSYNC_IOC_IOCP_REMOVE, &packet);
+			ASSERT_EQ(0, ret);
+			ASSERT_GE(packet.key, 1);
+			ASSERT_LE(packet.key, 3);
+			ASSERT_FALSE(seen[packet.key]);
+			seen[packet.key] = true;
+			if (packet.key < previous)
+				reordered++;
+			previous = packet.key;
+		}
+		close(iocp);
+	}
+
+	/* Neither failed removal may change the remaining packets' order. */
+	EXPECT_GT(checked, 0);
+	EXPECT_EQ(0, reordered);
+	close(fd);
+}
+
+TEST(iocp_fault_rollback_order)
+{
+	test_iocp_rollback_order(_metadata, false);
+}
+
+TEST(iocp_abandon_rollback_order)
+{
+	test_iocp_rollback_order(_metadata, true);
+}
+
 #define IOCP_ALERT_RACE_ITERATIONS 100000
 
 struct iocp_alert_race_args {
