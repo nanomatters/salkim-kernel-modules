@@ -94,3 +94,4 @@ ff30f43e2ee03c335dab25c55b3902d4f228a6f5 Fix CRTC initialization cleanup.
 a04891c9dc4c7e88dc829da8d754363e211bf0b9 Add timeline syncobj signalling to USERQ_SIGNAL.
 aae34734e429811386363603425645662d7c94c9 Advertise AMDGPU interface 3.65.
 5e6b21bce9d939b564e1f1c88a429cfa1fe66d3a Reserve WPTR eviction-fence slots.
+a2a27745350c7f2d142b3248e12fd3ba182f8766 Reserve root page-directory eviction-fence slots.
