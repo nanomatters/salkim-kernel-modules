@@ -99,3 +99,4 @@ a2a27745350c7f2d142b3248e12fd3ba182f8766 Reserve root page-directory eviction-fe
 c7ae3b2043282da8de92bd925c8f6bb614633181 Read the WPTR at its buffer offset.
 0b6a985c14e15950f71fe30390719da0bea7a606 Reject imported WPTR buffers.
 f9fcae49dfef21ef69cb38c0e5f118b8648ca4ac Report firmware metadata copy errors.
+b5ea7a31dc80812cec705cbe6cae78f52a597004 Report MES failure wait results and firmware status.
