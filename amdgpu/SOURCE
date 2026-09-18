@@ -145,3 +145,6 @@ drm/amdkfd: Correct VRAM availability accounting.
 
 https://www.mail-archive.com/amd-gfx@lists.freedesktop.org/msg154795.html
 drm/amd/pm: Restore forced levels after reset.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/17c85d3f3c54a6416c944aef5974783f63851573
+drm/amd/display: Correct urgent bandwidth conversion.
