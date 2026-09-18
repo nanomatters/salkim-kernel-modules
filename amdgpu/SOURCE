@@ -127,3 +127,6 @@ drm/amd/pm: Return SMU11 clock errors.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/5a54234b6414edf9cb7e1cf661c21dbde009f545
 drm/amd/pm: Mark the active DPM clock level.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/d2c1e98658b6c2ba95c61cef24693520edc82b07
+drm/amd/pm: Restore supported energy readings.
