@@ -181,3 +181,6 @@ drm/amd/display: Allow removal of unallocated MST payloads.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/d0cf969e9fdc5dc4bee0a3e285003cfaa852df16
 drm/amd/display: Initialize DC in hotplug tests.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/e38159437a91db68fe07cceb5421498e0a1bbeab
+drm/amd/display: Clear only available hotplug sources.
