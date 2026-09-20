@@ -139,3 +139,6 @@ drm/amdkfd: Bound interrupt drains during debugger exit.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/b8257bdb26ca5d9a75f4b81f629422f17afa221b
 drm/amdkfd: Credit pinned KFD memory.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/9131cc85d0dedd8ba4cae60dbe5985d081551f30
+drm/amdkfd: Correct VRAM availability accounting.

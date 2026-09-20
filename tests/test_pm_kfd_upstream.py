@@ -28,7 +28,7 @@ class PmKfdUpstreamTests(unittest.TestCase):
         else:
             source = (AMD / file).read_text()
         match = re.search(r'^(?:static\s+)?(?:int|void|size_t)\s+' +
-                          name + r'\(.*?^\}', source, re.M | re.S)
+                          name + r'\([^;]*?\)\s*\n\{.*?^\}', source, re.M | re.S)
         self.assertIsNotNone(match, name)
         return match.group()
 
@@ -62,9 +62,18 @@ class PmKfdUpstreamTests(unittest.TestCase):
         self.run_program(DRAIN_HARNESS.replace('ACTUAL_DRAIN', body))
 
     def test_available_memory_pin_credit(self):
-        body = self.function('amdgpu/amdgpu_amdkfd_gpuvm.c',
-                             'amdgpu_amdkfd_get_available_memory')
+        body = '\n'.join(self.function('amdgpu/amdgpu_amdkfd_gpuvm.c', name) for name in
+                         ('__get_available_memory', 'amdgpu_amdkfd_get_available_memory'))
         self.run_program(ACCOUNT_COMMON + body + ACCOUNT_MAIN)
+
+    def test_memory_admission_and_pins(self):
+        body = '\n'.join(self.function('amdgpu/amdgpu_amdkfd_gpuvm.c', name) for name in
+                         ('__get_available_memory', 'amdgpu_amdkfd_get_available_memory',
+                          'amdgpu_amdkfd_reserve_mem_limit', 'amdgpu_amdkfd_account_vram_pin',
+                          'amdgpu_amdkfd_account_vram_unpin'))
+        body += '\n' + '\n'.join(self.function('amdgpu/amdgpu_object.c', name) for name in
+                                  ('amdgpu_bo_get_xcp', 'amdgpu_bo_pin', 'amdgpu_bo_unpin'))
+        self.run_program(ACCOUNT_COMMON + PIN_COMMON + body + PIN_MAIN)
 
 
 PM_COMMON = r'''
@@ -393,6 +402,7 @@ ACCOUNT_COMMON = r"""
 #define ALIGN_DOWN(v,a) ((v) & ~((a) - 1))
 #define min3(a,b,c) ((a) < (b) ? ((a) < (c) ? (a) : (c)) : ((b) < (c) ? (b) : (c)))
 #define atomic64_read(p) (*(p))
+#define lockdep_assert_held(p) assert(*(p))
 #define KFD_XCP_MEMORY_SIZE(a,id) ((a)->size[id])
 #define ESTIMATE_PT_SIZE(v) (v)
 static uint64_t amdgpu_amdkfd_total_mem_size;
@@ -401,8 +411,10 @@ struct amdgpu_ras { uint64_t reserved_pages_in_bytes; };
 struct amdgpu_device {
     bool apu_prefer_gtt;
     struct { bool is_app_apu; } gmc;
-    struct { int64_t vram_used[2]; uint64_t vram_used_aligned[2], vram_pinned; } kfd;
-    uint64_t size[2], vram_pin_size;
+    struct { int64_t vram_used[2]; uint64_t vram_used_aligned[2], vram_pinned[2]; } kfd;
+    uint64_t size[2], vram_pin_size, vram_pin_size_xcp[2], vram_pin_size_common;
+    uint64_t visible_pin_size, gart_pin_size;
+    void *dev;
     struct amdgpu_ras *ras;
 };
 static struct {
@@ -420,13 +432,14 @@ int main(void)
     struct amdgpu_ras ras = { .reserved_pages_in_bytes = 2 * MiB };
     adev.size[0] = 64 * MiB;
     adev.kfd.vram_used_aligned[0] = 16 * MiB;
-    adev.kfd.vram_pinned = 8 * MiB;
-    adev.vram_pin_size = 12 * MiB;
+    adev.kfd.vram_pinned[0] = 8 * MiB;
+    adev.vram_pin_size_xcp[0] = 10 * MiB;
+    adev.vram_pin_size_common = 2 * MiB;
     assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 44 * MiB);
     adev.ras = &ras;
     amdgpu_amdkfd_total_mem_size = 2 * MiB;
     assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 40 * MiB);
-    adev.vram_pin_size = 60 * MiB;
+    adev.vram_pin_size_xcp[0] = 60 * MiB;
     assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 0);
     adev.apu_prefer_gtt = true;
     kfd_mem_limit.max_system_mem_limit = 32 * MiB;
@@ -436,6 +449,136 @@ int main(void)
     no_system_mem_limit = true;
     assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 32 * MiB);
     assert(!kfd_mem_limit.mem_limit_lock);
+    return 0;
+}
+"""
+
+
+
+PIN_COMMON = r"""
+#include <errno.h>
+#include <string.h>
+typedef uint32_t u32;
+typedef int8_t s8;
+#define MAX_XCP 2
+#define ALIGN(v,a) ALIGN_DOWN((v) + (a) - 1, a)
+#define AMDGPU_GEM_DOMAIN_VRAM 1u
+#define AMDGPU_GEM_DOMAIN_GTT 2u
+#define AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS 1u
+#define AMDGPU_GEM_CREATE_NO_CPU_ACCESS 2u
+#define AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED 4u
+#define TTM_PL_VRAM 0
+#define TTM_PL_TT 1
+#define TTM_PL_FLAG_CONTIGUOUS 1u
+#define KFD_IOC_ALLOC_MEM_FLAGS_VRAM 1u
+#define KFD_IOC_ALLOC_MEM_FLAGS_GTT 2u
+#define KFD_IOC_ALLOC_MEM_FLAGS_USERPTR 4u
+#define KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL 8u
+#define KFD_IOC_ALLOC_MEM_FLAGS_MMIO_REMAP 16u
+#define unlikely(v) (v)
+#define dev_err(...) ((void)0)
+#define pr_err(...) ((void)0)
+#define pr_debug(...) ((void)0)
+static unsigned warnings;
+#define WARN_ONCE(c, ...) ((c) ? (++warnings, 1) : 0)
+#define atomic64_add(v,p) (*(p) += (v))
+#define atomic64_sub(v,p) (*(p) -= (v))
+struct gem { void *import_attach; };
+struct ttm_resource { unsigned mem_type, placement; };
+struct ttm_buffer_object {
+    struct amdgpu_device *bdev;
+    struct ttm_resource *resource;
+    struct gem base;
+    void *ttm;
+    unsigned pin_count;
+};
+struct ttm_placement { unsigned num_placement; };
+struct ttm_operation_ctx { bool interruptible, no_wait_gpu; };
+struct amdgpu_bo {
+    struct ttm_buffer_object tbo;
+    struct ttm_placement placement;
+    struct { unsigned mem_type, flags; } placements[1];
+    unsigned preferred_domains, flags;
+    int8_t xcp_id;
+    void *kfd_bo;
+    uint64_t size;
+};
+static int validate_error;
+static struct amdgpu_device *amdgpu_ttm_adev(struct amdgpu_device *a) { return a; }
+static uint64_t amdgpu_bo_size(struct amdgpu_bo *b) { return b->size; }
+static uint64_t amdgpu_vram_mgr_bo_visible_size(struct amdgpu_bo *b) { return b->size; }
+static bool amdgpu_ttm_tt_get_usermm(void *p) { return !!p; }
+static bool drm_gem_is_imported(struct gem *p) { return !!p->import_attach; }
+static u32 amdgpu_mem_type_to_domain(unsigned t) { return t == TTM_PL_VRAM ? AMDGPU_GEM_DOMAIN_VRAM : AMDGPU_GEM_DOMAIN_GTT; }
+static u32 amdgpu_bo_get_preferred_domain(struct amdgpu_device *a, u32 d) { return d; }
+static void dma_buf_pin(void *p) { assert(p); }
+static void dma_buf_unpin(void *p) { assert(p); }
+static void amdgpu_bo_placement_from_domain(struct amdgpu_bo *b, u32 domain)
+{
+    b->tbo.resource->mem_type = domain == AMDGPU_GEM_DOMAIN_VRAM ? TTM_PL_VRAM : TTM_PL_TT;
+}
+static int ttm_bo_validate(struct ttm_buffer_object *b, struct ttm_placement *p, struct ttm_operation_ctx *c)
+{
+    return validate_error;
+}
+static void ttm_bo_pin(struct ttm_buffer_object *b) { b->pin_count++; }
+static void ttm_bo_unpin(struct ttm_buffer_object *b) { assert(b->pin_count); b->pin_count--; }
+"""
+PIN_MAIN = r"""
+int main(void)
+{
+    struct amdgpu_device adev = {0};
+    struct ttm_resource resources[4] = {0};
+    struct amdgpu_bo bo[4] = {0};
+    kfd_mem_limit.max_system_mem_limit = kfd_mem_limit.max_ttm_mem_limit = 128 * MiB;
+    adev.size[0] = adev.size[1] = 64 * MiB;
+    adev.kfd.vram_used[0] = adev.kfd.vram_used_aligned[0] = 16 * MiB;
+    adev.kfd.vram_used[1] = adev.kfd.vram_used_aligned[1] = 32 * MiB;
+    for (unsigned i = 0; i < 4; i++) {
+        bo[i].tbo.bdev = &adev;
+        bo[i].tbo.resource = &resources[i];
+        bo[i].size = (i == 0 ? 8 : i == 1 ? 4 : i == 2 ? 2 : 32) * MiB;
+        bo[i].xcp_id = i == 2 ? -1 : i == 3 ? 1 : 0;
+        if (i == 0 || i == 3) bo[i].kfd_bo = &bo[i];
+        assert(!amdgpu_bo_pin(&bo[i], AMDGPU_GEM_DOMAIN_VRAM));
+    }
+    assert(adev.vram_pin_size == 46 * MiB);
+    assert(adev.vram_pin_size_xcp[0] == 12 * MiB && adev.vram_pin_size_xcp[1] == 32 * MiB);
+    assert(adev.vram_pin_size_common == 2 * MiB);
+    assert(adev.kfd.vram_pinned[0] == 8 * MiB && adev.kfd.vram_pinned[1] == 32 * MiB);
+    assert(amdgpu_amdkfd_get_available_memory(&adev, 0) == 42 * MiB);
+    assert(amdgpu_amdkfd_get_available_memory(&adev, 1) == 30 * MiB);
+    assert(!amdgpu_bo_pin(&bo[0], AMDGPU_GEM_DOMAIN_VRAM));
+    assert(adev.kfd.vram_pinned[0] == 8 * MiB);
+    amdgpu_bo_unpin(&bo[0]);
+    assert(adev.kfd.vram_pinned[0] == 8 * MiB);
+    for (unsigned i = 0; i < 4; i++) amdgpu_bo_unpin(&bo[i]);
+    assert(!adev.vram_pin_size && !adev.vram_pin_size_common && !adev.visible_pin_size);
+    assert(!adev.kfd.vram_pinned[0] && !adev.kfd.vram_pinned[1]);
+    assert(!adev.vram_pin_size_xcp[0] && !adev.vram_pin_size_xcp[1]);
+    validate_error = -ENOMEM;
+    assert(amdgpu_bo_pin(&bo[0], AMDGPU_GEM_DOMAIN_VRAM) == -ENOMEM);
+    assert(!adev.vram_pin_size && !adev.kfd.vram_pinned[0]);
+    validate_error = 0;
+    assert(!amdgpu_bo_pin(&bo[0], AMDGPU_GEM_DOMAIN_GTT));
+    assert(adev.gart_pin_size == 8 * MiB && !adev.kfd.vram_pinned[0]);
+    amdgpu_bo_unpin(&bo[0]);
+    assert(!adev.gart_pin_size);
+    bo[0].xcp_id = -1;
+    assert(!amdgpu_bo_pin(&bo[0], AMDGPU_GEM_DOMAIN_VRAM));
+    amdgpu_bo_unpin(&bo[0]);
+    assert(warnings == 2 && !adev.vram_pin_size && !adev.vram_pin_size_common);
+    bo[0].xcp_id = 0;
+    assert(!amdgpu_bo_pin(&bo[0], AMDGPU_GEM_DOMAIN_VRAM));
+    /* Admission uses raw usage and gives back the KFD pin credit. */
+    adev.kfd.vram_used[0] = 64 * MiB - 4096;
+    adev.kfd.vram_used_aligned[0] = 64 * MiB;
+    assert(!amdgpu_amdkfd_reserve_mem_limit(&adev, 4096, KFD_IOC_ALLOC_MEM_FLAGS_VRAM, 0));
+    assert(adev.kfd.vram_used[0] == 64 * MiB);
+    assert(amdgpu_amdkfd_reserve_mem_limit(&adev, 4096, KFD_IOC_ALLOC_MEM_FLAGS_VRAM, 0) == -ENOMEM);
+    assert(adev.kfd.vram_used[0] == 64 * MiB);
+    assert(!kfd_mem_limit.mem_limit_lock);
+    amdgpu_bo_unpin(&bo[0]);
     return 0;
 }
 """
