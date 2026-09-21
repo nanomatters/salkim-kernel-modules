@@ -151,3 +151,6 @@ drm/amd/display: Correct urgent bandwidth conversion.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/7143e76318b36c89e808706f009ef0f1b5bfa069
 drm/amd/display: Power ISHARP memory before programming.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/8184bbc415210879182871b0ad3306635376c94f
+drm/amd/display: Fix DCC selection for rotated surfaces.
