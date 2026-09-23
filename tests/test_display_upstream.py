@@ -133,6 +133,29 @@ int main(void)
 }
 '''.replace('ACTUAL_DEFINES', defines).replace('ACTUAL_FUNCTIONS', functions))
 
+    def test_dsc_median_permutations(self):
+        function = self.function('dc/dml/dsc/rc_calc_fpu.c', 'median3')
+        self.run_program(r'''
+#include <assert.h>
+#define swap(a, b) do { int tmp = (a); (a) = (b); (b) = tmp; } while (0)
+ACTUAL_FUNCTION
+int main(void)
+{
+    for (int a = -5; a <= 5; a++) {
+        for (int b = -5; b <= 5; b++) {
+            for (int c = -5; c <= 5; c++) {
+                int result = median3(a, b, c);
+                assert(result == a || result == b || result == c);
+                assert((a <= result) + (b <= result) + (c <= result) >= 2);
+                assert((a >= result) + (b >= result) + (c >= result) >= 2);
+            }
+        }
+    }
+    assert(median3(0, 12, -1) == 0);
+    return 0;
+}
+'''.replace('ACTUAL_FUNCTION', function))
+
 
 if __name__ == '__main__':
     unittest.main()

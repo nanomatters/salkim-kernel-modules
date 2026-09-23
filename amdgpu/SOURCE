@@ -160,3 +160,6 @@ drm/amd/display: Correct prefetch deadline frame selection.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/e9ddfb93fafa50f92165d2b48c7728720999b117
 drm/amd/display: Wait for passive DVI EDID readiness.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/7b23bf82ccbdb4cf0752f2b8686e7319a7ce497f
+drm/amd/display: Correct DSC median calculation.
