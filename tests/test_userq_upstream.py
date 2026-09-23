@@ -49,6 +49,11 @@ class UserqUpstreamTests(unittest.TestCase):
         self.run_program(DESTROY_HARNESS.replace('ACTUAL_DESTROY', body))
 
 
+    def test_wptr_buffers(self):
+        body = self.function('amdgpu_userq_fence.c', 'amdgpu_userq_fence_read_wptr')
+        self.run_program(WPTR_HARNESS.replace('ACTUAL_WPTR', body))
+
+
 DESTROY_HARNESS = r'''
 #include <assert.h>
 #include <errno.h>
@@ -121,6 +126,97 @@ int main(void)
     assert(cancelled == 8 && detached == 4 && unmapped == 4);
     assert(destroyed == 4 && powered == 4 && resets == 2);
     puts("UserQ destruction: pending watchdog and cleanup cases passed");
+    return 0;
+}
+'''
+
+
+WPTR_HARNESS = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+typedef uint64_t u64;
+#define AMDGPU_GPU_PAGE_SHIFT 12
+#define AMDGPU_GMC_HOLE_MASK 0x0000ffffffffffffULL
+#define DRM_EXEC_IGNORE_DUPLICATES 1
+#define DRM_ERROR(...) ((void)0)
+#define unlikely(v) (v)
+#define le64_to_cpu(v) (v)
+#define drm_exec_until_all_locked(e) for (bool once = true; once; once = false)
+#define drm_exec_retry_on_contention(e) ((void)0)
+struct drm_exec { int unused; };
+struct gem_object { size_t size; };
+struct amdgpu_bo { struct { struct gem_object base; } tbo; uint64_t words[1024]; };
+struct amdgpu_bo_va { struct { struct amdgpu_bo *bo; } base; };
+struct amdgpu_bo_va_mapping { u64 start, last, offset; struct amdgpu_bo_va *bo_va; };
+struct amdgpu_vm { struct amdgpu_bo_va_mapping *mapping; };
+struct amdgpu_usermode_queue { struct amdgpu_vm *vm; struct { u64 wptr_gpu_addr; } *userq_prop; };
+struct amdgpu_device { int unused; };
+static int pd_error, bo_error, map_error;
+static unsigned maps, unmaps, cleanups;
+static void drm_exec_init(struct drm_exec *exec, unsigned flags, unsigned objects)
+{ (void)exec; (void)flags; (void)objects; }
+static void drm_exec_fini(struct drm_exec *exec) { (void)exec; cleanups++; }
+static int amdgpu_vm_lock_pd(struct amdgpu_vm *vm, struct drm_exec *exec, unsigned fences)
+{ (void)vm; (void)exec; (void)fences; return pd_error; }
+static struct amdgpu_bo_va_mapping *amdgpu_vm_bo_lookup_mapping(struct amdgpu_vm *vm, u64 address)
+{
+    u64 page = address >> AMDGPU_GPU_PAGE_SHIFT;
+    return vm->mapping && page >= vm->mapping->start && page <= vm->mapping->last ? vm->mapping : NULL;
+}
+static int drm_exec_lock_obj(struct drm_exec *exec, struct gem_object *object)
+{ (void)exec; (void)object; return bo_error; }
+static int amdgpu_bo_kmap(struct amdgpu_bo *bo, void **pointer)
+{ maps++; *pointer = bo->words; return map_error; }
+static void amdgpu_bo_kunmap(struct amdgpu_bo *bo) { (void)bo; unmaps++; }
+ACTUAL_WPTR
+int main(void)
+{
+    struct amdgpu_device adev = {0};
+    struct amdgpu_bo bo = {0};
+    struct amdgpu_bo_va bo_va = {.base.bo = &bo};
+    const u64 base = 0x123450000ULL;
+    struct amdgpu_bo_va_mapping mapping = {.start = base >> 12, .last = base >> 12, .bo_va = &bo_va};
+    struct amdgpu_vm vm = {.mapping = &mapping};
+    struct { u64 wptr_gpu_addr; } props = {0};
+    struct amdgpu_usermode_queue queue = {.vm = &vm, .userq_prop = (void *)&props};
+    for (unsigned i = 0; i < 1024; ++i)
+        bo.words[i] = 0x1000000000000000ULL + i;
+    u64 result = 0;
+    unsigned cases = 0;
+    for (u64 mapping_offset = 0; mapping_offset <= 4096; mapping_offset += 4096) {
+        mapping.offset = mapping_offset;
+        for (u64 offset = 0; offset < 4096; offset += 8) {
+            props.wptr_gpu_addr = base + offset;
+            assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == 0);
+            assert(result == bo.words[(mapping_offset + offset) / 8]);
+            cases++;
+        }
+    }
+    assert(maps == cases && unmaps == cases && cleanups == cases);
+    props.wptr_gpu_addr = base | 0xffff000000000000ULL;
+    assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == 0);
+    assert(result == bo.words[512]);
+    props.wptr_gpu_addr = base + 4096;
+    assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == -EINVAL);
+    props.wptr_gpu_addr = base;
+    bo_va.base.bo = NULL;
+    assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == -EINVAL);
+    bo_va.base.bo = &bo;
+    pd_error = -EINTR;
+    assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == -EINTR);
+    pd_error = 0;
+    bo_error = -EDEADLK;
+    assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == -EDEADLK);
+    bo_error = 0;
+    unsigned old_unmaps = unmaps;
+    map_error = -EIO;
+    assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == -EIO);
+    assert(unmaps == old_unmaps);
+    printf("UserQ WPTR: %u offsets and mapping failure cases passed\n", cases);
     return 0;
 }
 '''
