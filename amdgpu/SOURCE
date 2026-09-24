@@ -81,3 +81,4 @@ ba4c3c202919405f461a393e823e4b72c8518494 Reject oversized command submission chu
 c3fed6272bb4771a849c33c781af99afa90e90ad Guard video entity cleanup after failed probe.
 167df3b94680b8670c4cacc08af232e3bfcab5ff Initialize TD-LUT programming inputs.
 ff30f43e2ee03c335dab25c55b3902d4f228a6f5 Fix CRTC initialization cleanup.
+1849d152f79689e7539b9e96602c3c5173ea81ec Handle colour pipeline name allocation failure.

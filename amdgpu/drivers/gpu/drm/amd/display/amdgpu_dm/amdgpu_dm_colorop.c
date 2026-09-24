@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /*
  * Copyright 2023 Advanced Micro Devices, Inc.
  *
@@ -213,6 +214,10 @@ amdgpu_dm_build_default_pipeline(struct drm_device *dev, struct drm_plane *plane
 	drm_colorop_set_next_property(ops[i-1], ops[i]);
 
 	list->name = kasprintf(GFP_KERNEL, "Color Pipeline %d", ops[0]->base.id);
+	if (!list->name) {
+		ret = -ENOMEM;
+		goto cleanup;
+	}
 
 	return 0;
 
