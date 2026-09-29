@@ -256,7 +256,7 @@ int amdgpu_userq_input_va_validate(struct amdgpu_device *adev,
 	start_page = start_addr >> AMDGPU_GPU_PAGE_SHIFT;
 
 	va_map = amdgpu_vm_bo_lookup_mapping(vm, start_page);
-	if (!va_map)
+	if (!va_map || !va_map->bo_va->base.bo)
 		return -EINVAL;
 
 	/* Lookup guarantees start_page is mapped; ensure full span is covered. */
