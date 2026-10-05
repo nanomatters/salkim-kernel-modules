@@ -112,3 +112,6 @@ drm/amdgpu: Clear page tables after VM resets.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/4e4509d0b0113d1b0c5d023dce12baa346e7c65b
 drm/amdgpu: Reject unknown metadata operations.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/c57b810a7fbd63cdff117c1b8a73ad1bd335e2b1
+drm/amdgpu: Fail on VCN firmware load errors.
