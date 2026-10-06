@@ -148,3 +148,6 @@ drm/amd/pm: Restore forced levels after reset.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/17c85d3f3c54a6416c944aef5974783f63851573
 drm/amd/display: Correct urgent bandwidth conversion.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/7143e76318b36c89e808706f009ef0f1b5bfa069
+drm/amd/display: Power ISHARP memory before programming.
