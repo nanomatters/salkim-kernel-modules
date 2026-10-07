@@ -156,6 +156,79 @@ int main(void)
 }
 '''.replace('ACTUAL_FUNCTION', function))
 
+    def test_full_update_exits_self_refresh(self):
+        function = self.function('amdgpu_dm/amdgpu_dm.c',
+                                 'amdgpu_dm_mod_power_update_streams')
+        self.run_program(r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+struct drm_crtc { int unused; };
+struct drm_crtc_state { bool active, modeset; };
+struct dc_stream_state { void *dm_stream_context; };
+struct dm_crtc_state { struct drm_crtc_state base; struct dc_stream_state *stream; };
+struct amdgpu_dm_connector { int psr_caps; };
+struct amdgpu_display_manager { int dc_lock, dc, power_module; };
+struct drm_atomic_commit { struct dm_crtc_state *old_state, *new_state; };
+static unsigned psr, replay, added, replaced, removed, sequence;
+#define to_dm_crtc_state(state) ((struct dm_crtc_state *)(state))
+#define drm_atomic_crtc_needs_modeset(state) ((state)->modeset)
+#define for_each_oldnew_crtc_in_state(state, crtc, old, new, i) \
+    for ((i) = 0, (crtc) = NULL, (old) = &(state)->old_state->base, \
+         (new) = &(state)->new_state->base; (i) == 0; ++(i))
+#define scoped_guard(...) for (int guard = 1; guard; guard = 0)
+#define dc_exit_ips_for_hw_access(dc) ((void)(dc))
+#define psr_event_hw_programming 1
+#define replay_event_hw_programming 2
+#define replay_event_general_ui 3
+static void set_event(struct amdgpu_display_manager *dm, struct dc_stream_state *stream,
+                      bool active, unsigned event, bool value)
+{
+    (void)dm;
+    if (!stream)
+        return;
+    assert(active && value);
+    assert(sequence == 0);
+    if (event == psr_event_hw_programming)
+        psr++;
+    else if (event == replay_event_hw_programming)
+        replay++;
+    else
+        assert(false);
+}
+#define amdgpu_dm_psr_set_event set_event
+#define amdgpu_dm_replay_set_event set_event
+#define mod_power_add_stream(...) ((void)(aconnector), added++, sequence++)
+#define mod_power_replace_stream(...) ((void)(aconnector), replaced++, sequence++)
+#define mod_power_remove_stream(...) (removed++, sequence++)
+ACTUAL_FUNCTION
+static void check(bool old_active, bool new_active, bool modeset, bool same,
+                  unsigned events, unsigned add, unsigned replace, unsigned remove)
+{
+    struct amdgpu_display_manager dm = {0};
+    struct amdgpu_dm_connector connector = {0};
+    struct dc_stream_state first = { &connector }, second = { &connector };
+    struct dm_crtc_state old = { {old_active, false}, old_active ? &first : NULL };
+    struct dm_crtc_state new = { {new_active, modeset}, new_active ? (same ? &first : &second) : NULL };
+    struct drm_atomic_commit state = { &old, &new };
+    psr = replay = added = replaced = removed = sequence = 0;
+    amdgpu_dm_mod_power_update_streams(&state, &dm);
+    assert(psr == events && replay == events);
+    assert(added == add && replaced == replace && removed == remove);
+}
+int main(void)
+{
+    check(true, true, false, true, 1, 0, 0, 0);
+    check(true, true, true, true, 1, 0, 0, 0);
+    check(true, true, true, false, 1, 0, 1, 0);
+    check(false, true, true, false, 0, 1, 0, 0);
+    check(true, false, true, false, 1, 0, 0, 1);
+    check(false, false, false, true, 0, 0, 0, 0);
+    return 0;
+}
+'''.replace('ACTUAL_FUNCTION', function).replace(
+            '(i) == 0; ++(i)', '(void)(crtc), (i) == 0; ++(i)'))
+
 
 if __name__ == '__main__':
     unittest.main()

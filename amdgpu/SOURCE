@@ -163,3 +163,6 @@ drm/amd/display: Wait for passive DVI EDID readiness.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/7b23bf82ccbdb4cf0752f2b8686e7319a7ce497f
 drm/amd/display: Correct DSC median calculation.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/4a21f411a841e8f323b0e9afab9178c54b59123c
+drm/amd/display: Exit self-refresh before full updates.
