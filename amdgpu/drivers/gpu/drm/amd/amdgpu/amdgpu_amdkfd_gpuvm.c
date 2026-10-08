@@ -507,7 +507,11 @@ static int vm_update_pds(struct amdgpu_vm *vm, struct amdgpu_sync *sync)
 	if (ret)
 		return ret;
 
-	return amdgpu_sync_fence(sync, vm->last_update, GFP_KERNEL);
+	ret = amdgpu_sync_fence(sync, vm->last_update, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	return amdgpu_sync_fence(sync, vm->last_tlb_inv, GFP_KERNEL);
 }
 
 static uint64_t get_pte_flags(struct amdgpu_device *adev, struct amdgpu_vm *vm,
@@ -1288,6 +1292,8 @@ static int unmap_bo_from_gpuvm(struct kgd_mem *mem,
 	(void)amdgpu_vm_clear_freed(adev, vm, &bo_va->last_pt_update);
 
 	(void)amdgpu_sync_fence(sync, bo_va->last_pt_update, GFP_KERNEL);
+	if (amdgpu_sync_fence(sync, vm->last_tlb_inv, GFP_KERNEL))
+		dma_fence_wait(vm->last_tlb_inv, false);
 
 	return 0;
 }

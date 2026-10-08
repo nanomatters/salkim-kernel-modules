@@ -1182,6 +1182,7 @@ retry_lock:
 	 */
 	dma_fence_wait(fpriv->prt_va->last_pt_update, false);
 	dma_fence_wait(vm->last_update, false);
+	dma_fence_wait(vm->last_tlb_inv, false);
 
 	xa_for_each(&uq_mgr->userq_xa, tmp_key, queue) {
 		bo = queue->wptr_obj.obj;
