@@ -51,6 +51,7 @@ class UserqUpstreamTests(unittest.TestCase):
 
     def test_wptr_buffers(self):
         body = self.function('amdgpu_userq_fence.c', 'amdgpu_userq_fence_read_wptr')
+        body += '\n' + self.function('mes_userqueue.c', 'mes_userq_create_wptr_mapping')
         self.run_program(WPTR_HARNESS.replace('ACTUAL_WPTR', body))
 
 
@@ -140,6 +141,8 @@ WPTR_HARNESS = r'''
 #include <stdio.h>
 typedef uint64_t u64;
 #define AMDGPU_GPU_PAGE_SHIFT 12
+#define PAGE_SIZE 4096
+#define TTM_NUM_MOVE_FENCES 2
 #define AMDGPU_GMC_HOLE_MASK 0x0000ffffffffffffULL
 #define DRM_EXEC_IGNORE_DUPLICATES 1
 #define DRM_ERROR(...) ((void)0)
@@ -148,15 +151,28 @@ typedef uint64_t u64;
 #define drm_exec_until_all_locked(e) for (bool once = true; once; once = false)
 #define drm_exec_retry_on_contention(e) ((void)0)
 struct drm_exec { int unused; };
-struct gem_object { size_t size; };
-struct amdgpu_bo { struct { struct gem_object base; } tbo; uint64_t words[1024]; };
+struct gem_object { size_t size; bool imported; };
+struct amdgpu_bo { struct { struct gem_object base; } tbo; uint64_t words[1024]; unsigned refs; };
 struct amdgpu_bo_va { struct { struct amdgpu_bo *bo; } base; };
 struct amdgpu_bo_va_mapping { u64 start, last, offset; struct amdgpu_bo_va *bo_va; };
 struct amdgpu_vm { struct amdgpu_bo_va_mapping *mapping; };
-struct amdgpu_usermode_queue { struct amdgpu_vm *vm; struct { u64 wptr_gpu_addr; } *userq_prop; };
+struct amdgpu_userq_obj { struct amdgpu_bo *obj; u64 gpu_addr; };
+struct amdgpu_usermode_queue { struct amdgpu_vm *vm; struct { u64 wptr_gpu_addr; } *userq_prop;
+                              struct amdgpu_userq_obj wptr_obj; };
+struct amdgpu_userq_mgr { int evf_mgr; };
 struct amdgpu_device { int unused; };
-static int pd_error, bo_error, map_error;
-static unsigned maps, unmaps, cleanups;
+static int pd_error, bo_error, map_error, attach_error, gart_error;
+static unsigned maps, unmaps, cleanups, attached, gart;
+bool drm_gem_is_imported(struct gem_object *object) { return object->imported; }
+static struct amdgpu_userq_mgr *uq_mgr_to_fpriv(struct amdgpu_userq_mgr *mgr) { return mgr; }
+static int drm_exec_prepare_obj(struct drm_exec *exec, struct gem_object *object, unsigned fences)
+{ (void)exec; (void)object; assert(fences == TTM_NUM_MOVE_FENCES + 1); return bo_error; }
+static struct amdgpu_bo *amdgpu_bo_ref(struct amdgpu_bo *bo) { bo->refs++; return bo; }
+static void amdgpu_bo_unref(struct amdgpu_bo **bo) { assert((*bo)->refs); (*bo)->refs--; *bo = NULL; }
+static int amdgpu_evf_mgr_attach_fence(int *mgr, struct amdgpu_bo *bo)
+{ (void)mgr; (void)bo; attached++; return attach_error; }
+static int amdgpu_ttm_alloc_gart(void *ttm) { (void)ttm; gart++; return gart_error; }
+static u64 amdgpu_bo_gpu_offset(struct amdgpu_bo *bo) { (void)bo; return 0x2000000; }
 static void drm_exec_init(struct drm_exec *exec, unsigned flags, unsigned objects)
 { (void)exec; (void)flags; (void)objects; }
 static void drm_exec_fini(struct drm_exec *exec) { (void)exec; cleanups++; }
@@ -170,13 +186,13 @@ static struct amdgpu_bo_va_mapping *amdgpu_vm_bo_lookup_mapping(struct amdgpu_vm
 static int drm_exec_lock_obj(struct drm_exec *exec, struct gem_object *object)
 { (void)exec; (void)object; return bo_error; }
 static int amdgpu_bo_kmap(struct amdgpu_bo *bo, void **pointer)
-{ maps++; *pointer = bo->words; return map_error; }
+{ assert(!bo->tbo.base.imported); maps++; *pointer = bo->words; return map_error; }
 static void amdgpu_bo_kunmap(struct amdgpu_bo *bo) { (void)bo; unmaps++; }
 ACTUAL_WPTR
 int main(void)
 {
     struct amdgpu_device adev = {0};
-    struct amdgpu_bo bo = {0};
+    struct amdgpu_bo bo = {.tbo.base.size = 8192};
     struct amdgpu_bo_va bo_va = {.base.bo = &bo};
     const u64 base = 0x123450000ULL;
     struct amdgpu_bo_va_mapping mapping = {.start = base >> 12, .last = base >> 12, .bo_va = &bo_va};
@@ -216,7 +232,35 @@ int main(void)
     map_error = -EIO;
     assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == -EIO);
     assert(unmaps == old_unmaps);
-    printf("UserQ WPTR: %u offsets and mapping failure cases passed\n", cases);
+    map_error = 0;
+    mapping.offset = 0;
+    bo.tbo.base.size = PAGE_SIZE;
+    struct amdgpu_userq_mgr mgr = {0};
+    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == 0);
+    assert(queue.wptr_obj.obj == &bo && bo.refs == 1);
+    assert(queue.wptr_obj.gpu_addr == 0x2000000);
+    struct amdgpu_bo imported = {.tbo.base = {.size = PAGE_SIZE, .imported = true}};
+    bo_va.base.bo = &imported;
+    unsigned old_maps = maps, old_attached = attached, old_gart = gart;
+    assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == -EINVAL);
+    assert(maps == old_maps);
+    amdgpu_bo_unref(&queue.wptr_obj.obj);
+    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == -EINVAL);
+    assert(imported.refs == 0 && attached == old_attached && gart == old_gart);
+    bo_va.base.bo = &bo;
+    assert(bo.refs == 0);
+    bo.tbo.base.size = PAGE_SIZE * 2;
+    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == -EINVAL);
+    assert(bo.refs == 0);
+    bo.tbo.base.size = PAGE_SIZE;
+    attach_error = -ENOMEM;
+    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == -ENOMEM);
+    assert(bo.refs == 0);
+    attach_error = 0;
+    gart_error = -EIO;
+    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == -EIO);
+    assert(bo.refs == 0);
+    printf("UserQ WPTR: %u offsets, imported buffers and mapping failures passed\n", cases);
     return 0;
 }
 '''
