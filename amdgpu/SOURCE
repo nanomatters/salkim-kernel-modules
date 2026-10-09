@@ -124,3 +124,6 @@ drm/amd/pm: Initialize SMU features before RAS.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/1b7af9e6fbb6b967b717c91eafebf28e08dd9dc7
 drm/amd/pm: Return SMU11 clock errors.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/5a54234b6414edf9cb7e1cf661c21dbde009f545
+drm/amd/pm: Mark the active DPM clock level.
