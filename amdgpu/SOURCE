@@ -178,3 +178,6 @@ drm/amd/display: Cap DSC bandwidth on shared USB4 tunnels.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/88a27f624dc0ebc14a7ab274a84d977ce8513cb6
 drm/amd/display: Allow removal of unallocated MST payloads.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/d0cf969e9fdc5dc4bee0a3e285003cfaa852df16
+drm/amd/display: Initialize DC in hotplug tests.
