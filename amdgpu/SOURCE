@@ -154,3 +154,6 @@ drm/amd/display: Power ISHARP memory before programming.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/8184bbc415210879182871b0ad3306635376c94f
 drm/amd/display: Fix DCC selection for rotated surfaces.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/d60c9ee9014f663c43c156afec76e6774e3ea06e
+drm/amd/display: Correct prefetch deadline frame selection.

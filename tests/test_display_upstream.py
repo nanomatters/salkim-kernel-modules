@@ -28,7 +28,7 @@ DISPLAY = find_display()
 class DisplayUpstreamTests(unittest.TestCase):
     def function(self, file, name):
         source = (DISPLAY / file).read_text()
-        match = re.search(r'^(?:static )?(?:bool|void|int) ' + name +
+        match = re.search(r'^(?:static )?(?:bool|void|int|uint32_t) ' + name +
                           r'\(.*?^\}', source, re.M | re.S)
         self.assertIsNotNone(match, name)
         return match.group()
@@ -94,6 +94,44 @@ ACTUAL_CALLS
     return 0;
 }
 '''.replace('ACTUAL_FUNCTIONS', bodies).replace('ACTUAL_CALLS', calls))
+
+    def test_prefetch_deadline_frame(self):
+        base = 'dc/dml2_0/dml21/src/dml2_standalone_libraries/alternate_pstate_shared_lib'
+        header = (DISPLAY / (base + '.h')).read_text()
+        defines = '\n'.join(re.findall(r'^#define (?:END_SWATH_REC|MAX_FRAME_COUNT) .*$',
+                                       header, re.M))
+        names = ['in_circular_range', 'count_vstartups', 'calculate_swath_deadline_dst',
+                 'is_dst_in_next_frame', 'is_end_swath_in_next_frame',
+                 'is_svp_dst_in_next_frame']
+        functions = '\n'.join(self.function(base + '.c', name) for name in names)
+        self.run_program(r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+ACTUAL_DEFINES
+ACTUAL_FUNCTIONS
+int main(void)
+{
+    const uint32_t frames[] = {0, 1, MAX_FRAME_COUNT - 1, MAX_FRAME_COUNT};
+    for (unsigned i = 0; i < sizeof(frames) / sizeof(frames[0]); i++) {
+        uint32_t frame = frames[i];
+        /* Prefetch starts before the line-counter wrap and finishes after it. */
+        assert(is_svp_dst_in_next_frame(0, 1000, 2, 10000, 20000, 1000,
+                                       1000, 50, frame, 1000, frame, 100));
+        /* These intervals do not cross the line-counter wrap. */
+        assert(!is_svp_dst_in_next_frame(0, 5, 2, 10000, 20000, 1000,
+                                        1000, 50, frame, 1000, frame, 100));
+        assert(!is_svp_dst_in_next_frame(0, 1000, 2, 10000, 20000, 1000,
+                                        1000, 50, frame, 5, frame, 100));
+        assert(!is_svp_dst_in_next_frame(1, 1000, 2, 10000, 20000, 1000,
+                                        1000, 50, frame, 1000, frame, 100));
+        /* A deadline after the ordinary frame boundary needs no correction. */
+        assert(is_svp_dst_in_next_frame(0, 5, 2, 200000, 250000, 1000,
+                                       1000, 50, frame, 1000, frame, 100));
+    }
+    return 0;
+}
+'''.replace('ACTUAL_DEFINES', defines).replace('ACTUAL_FUNCTIONS', functions))
 
 
 if __name__ == '__main__':
