@@ -133,3 +133,6 @@ drm/amd/pm: Restore supported energy readings.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/95263281fd7567b7c511c69a4c9d0ea7b21bb268
 drm/amdkfd: Disable debugging before retiring queues.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/6c056350226aac4aef57d36b262bc36e64bd40ca
+drm/amdkfd: Bound interrupt drains during debugger exit.

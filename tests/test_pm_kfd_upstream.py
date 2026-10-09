@@ -56,6 +56,11 @@ class PmKfdUpstreamTests(unittest.TestCase):
         body = self.function('amdkfd/kfd_process.c', 'kfd_process_notifier_release_internal')
         self.run_program(DEBUG_HARNESS.replace('ACTUAL_EXIT', body))
 
+    def test_irq_drain_completion(self):
+        body = '\n'.join(self.function('amdgpu/amdgpu_ids.c', name) for name in
+                         ('amdgpu_pasid_drain_irq', 'amdgpu_pasid_drain_irq_done'))
+        self.run_program(DRAIN_HARNESS.replace('ACTUAL_DRAIN', body))
+
 
 PM_COMMON = r'''
 #include <assert.h>
@@ -253,13 +258,14 @@ static void mutex_unlock(struct mutex *p) { assert(p->held); p->held = false; }
 static void kfd_process_table_remove(struct kfd_process *p) { p->table_removed = true; }
 static bool cancel_delayed_work_sync(struct work *p) { bool pending = p->pending; p->pending = false; return pending; }
 static void kfd_unref_process(struct kfd_process *p) { p->unrefs++; }
-static void debug_disable(struct kfd_process *p)
+static void debug_disable(struct kfd_process *p, bool drain)
 {
+    assert(drain == !p->table_removed);
     assert(!p->retired && p->mm);
     p->debug_disabled = true;
     if (p->debugger_process) p->debugger_process->debugged_process_count--;
 }
-#define kfd_dbg_trap_disable(p, ...) debug_disable(p)
+#define kfd_dbg_trap_disable(p, drain) debug_disable(p, drain)
 static void kfd_process_dequeue_from_all_devices(struct kfd_process *p)
 {
     assert(p->table_removed && p->debug_disabled && p->mm);
@@ -297,6 +303,73 @@ int main(void)
         assert(target.debug_disabled == !!(flags & 32));
         assert(!p.debugged_process_count && !target.mutex.held);
     }
+    return 0;
+}
+"""
+
+
+
+DRAIN_HARNESS = r"""
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+typedef uint32_t u32;
+#define ERESTARTSYS 512
+struct amdgpu_device { int unused; };
+struct completion { bool done; };
+struct amdgpu_fpriv { struct completion irq_drain_done; };
+static struct amdgpu_fpriv owner;
+static bool locked, has_owner = true;
+static unsigned waits, sends;
+static int send_error, scenario;
+void amdgpu_pasid_drain_irq_done(u32 pasid);
+static void amdgpu_pasid_lock(unsigned long *flags) { assert(!locked); locked = true; *flags = 1; }
+static void amdgpu_pasid_unlock(unsigned long flags) { assert(locked && flags == 1); locked = false; }
+static struct amdgpu_fpriv *amdgpu_pasid_get_fpriv_locked(u32 pasid)
+{
+    assert(locked && pasid == 7);
+    return has_owner ? &owner : NULL;
+}
+static void reinit_completion(struct completion *c) { assert(locked); c->done = false; }
+static void complete(struct completion *c) { assert(locked); c->done = true; }
+static int amdgpu_amdkfd_send_close_event_drain_irq(struct amdgpu_device *a, u32 *packet)
+{
+    assert(!locked && packet[0] == 123);
+    sends++;
+    if (scenario == 1) amdgpu_pasid_drain_irq_done(7);
+    return send_error;
+}
+static long wait_for_completion_interruptible_timeout(struct completion *c, unsigned long timeout)
+{
+    assert(!locked && timeout == 50);
+    waits++;
+    if (scenario == 2) amdgpu_pasid_drain_irq_done(7);
+    if (scenario == 3) return -ERESTARTSYS;
+    return c->done ? 1 : 0;
+}
+ACTUAL_DRAIN
+int main(void)
+{
+    struct amdgpu_device adev = {0};
+    u32 packet[] = {123};
+    for (scenario = 0; scenario < 4; scenario++) {
+        owner.irq_drain_done.done = true;
+        waits = sends = 0;
+        int ret = amdgpu_pasid_drain_irq(&adev, 7, packet, 50);
+        assert(ret == (scenario == 0 ? -ETIMEDOUT : scenario == 3 ? -ERESTARTSYS : 0));
+        assert(waits == 1 && sends == 1 && !locked);
+    }
+    has_owner = false;
+    waits = sends = 0;
+    assert(amdgpu_pasid_drain_irq(&adev, 7, packet, 50) == -ENOENT);
+    amdgpu_pasid_drain_irq_done(7);
+    assert(!waits && !sends && !locked);
+    has_owner = true;
+    send_error = -EIO;
+    assert(!amdgpu_pasid_drain_irq(&adev, 7, packet, 50));
+    assert(!waits && sends == 1 && !locked);
     return 0;
 }
 """
