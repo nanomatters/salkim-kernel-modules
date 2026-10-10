@@ -172,3 +172,6 @@ drm/amd/display: Limit SST DSC bandwidth on USB4.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/cd53dcd2a7d733162d8e23472d65995ca0b58902
 drm/amd/display: Limit MST DSC bandwidth on USB4.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/0d7ee3341609151ceb6071e85e102e9b1806b6dc
+drm/amd/display: Cap DSC bandwidth on shared USB4 tunnels.
