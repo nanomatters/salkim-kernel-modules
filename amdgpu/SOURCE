@@ -118,3 +118,6 @@ drm/amdgpu: Fail on VCN firmware load errors.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/ad6eb088a508d927641c8a76d1ca7911dfb7c80b
 drm/amd/pm: Restore UMD profiles after recovery.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/98d6ccf7e48c5141e0eb03cc5da6e5131e25a8d5
+drm/amd/pm: Initialize SMU features before RAS.
