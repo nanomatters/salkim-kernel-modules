@@ -87,3 +87,4 @@ ff30f43e2ee03c335dab25c55b3902d4f228a6f5 Fix CRTC initialization cleanup.
 9866cb13ba4d39aa8fed34b765d4aecabe04f02e Validate SRAT record bounds.
 2e0f334f5c7140b67f16eff9d93c2ca426848664 Restrict SMI events to authorized clients.
 52957e813f2f025c86e4aa6e86cb4963ef94fd00 Fix VRAM accounting for unmapped SVM splits.
+8f3ecda0ab42fb5ba7310fe848013d3eff31b416 Avoid repeated CRIU queue eviction.
