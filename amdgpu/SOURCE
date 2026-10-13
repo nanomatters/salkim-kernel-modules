@@ -98,3 +98,4 @@ a2a27745350c7f2d142b3248e12fd3ba182f8766 Reserve root page-directory eviction-fe
 38f4fe785b5d58cde2ae9b9d26720755673e13c4 Cancel the UserQ watchdog before taking its mutex.
 c7ae3b2043282da8de92bd925c8f6bb614633181 Read the WPTR at its buffer offset.
 0b6a985c14e15950f71fe30390719da0bea7a606 Reject imported WPTR buffers.
+f9fcae49dfef21ef69cb38c0e5f118b8648ca4ac Report firmware metadata copy errors.
