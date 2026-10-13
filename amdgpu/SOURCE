@@ -89,3 +89,4 @@ ff30f43e2ee03c335dab25c55b3902d4f228a6f5 Fix CRTC initialization cleanup.
 52957e813f2f025c86e4aa6e86cb4963ef94fd00 Fix VRAM accounting for unmapped SVM splits.
 8f3ecda0ab42fb5ba7310fe848013d3eff31b416 Avoid repeated CRIU queue eviction.
 1233dd17f99c75787a31035656ecfeff80522421 Drain processes before freeing a removed device.
+3254ed0b15f2fe656c9cb36ccb59b92422440bf8 Stop restore retries after GPU removal.
