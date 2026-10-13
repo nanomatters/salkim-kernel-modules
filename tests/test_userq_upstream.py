@@ -55,6 +55,13 @@ class UserqUpstreamTests(unittest.TestCase):
         self.run_program(WPTR_HARNESS.replace('ACTUAL_WPTR', body))
 
 
+    def test_firmware_copy_errors(self):
+        match = re.search(r'\tcase AMDGPU_INFO_UQ_FW_AREAS: (\{.*?^\t\})',
+                          self.source('amdgpu_kms.c'), re.M | re.S)
+        self.assertIsNotNone(match)
+        self.run_program(FIRMWARE_HARNESS.replace('ACTUAL_CASE', match.group(1)))
+
+
 DESTROY_HARNESS = r'''
 #include <assert.h>
 #include <errno.h>
@@ -65,8 +72,9 @@ struct mutex { bool held; };
 struct work { bool pending; struct mutex *needed; };
 struct amdgpu_usermode_queue;
 struct amdgpu_userq_funcs { void (*mqd_destroy)(struct amdgpu_usermode_queue *); };
+struct reset_domain { int wq; };
 struct amdgpu_device { const struct amdgpu_userq_funcs *userq_funcs[1];
-                       struct { int wq; } *reset_domain; void *dev; };
+                       struct reset_domain *reset_domain; void *dev; };
 struct amdgpu_userq_mgr { struct amdgpu_device *adev; struct work resume_work, reset_work;
                          struct mutex userq_mutex; int userq_count[1]; };
 struct amdgpu_usermode_queue { unsigned queue_type; struct work hang_detect_work;
@@ -111,8 +119,8 @@ int main(void)
     for (unsigned pending = 0; pending < 2; pending++) {
         for (unsigned failed = 0; failed < 2; failed++) {
             struct amdgpu_device adev = {.userq_funcs = {&funcs}};
-            struct { int wq; } domain = {0};
-            adev.reset_domain = (void *)&domain;
+            struct reset_domain domain = {0};
+            adev.reset_domain = &domain;
             struct amdgpu_userq_mgr mgr = {.adev = &adev, .userq_count = {1}};
             struct amdgpu_usermode_queue *queue = calloc(1, sizeof(*queue));
             assert(queue);
@@ -157,7 +165,8 @@ struct amdgpu_bo_va { struct { struct amdgpu_bo *bo; } base; };
 struct amdgpu_bo_va_mapping { u64 start, last, offset; struct amdgpu_bo_va *bo_va; };
 struct amdgpu_vm { struct amdgpu_bo_va_mapping *mapping; };
 struct amdgpu_userq_obj { struct amdgpu_bo *obj; u64 gpu_addr; };
-struct amdgpu_usermode_queue { struct amdgpu_vm *vm; struct { u64 wptr_gpu_addr; } *userq_prop;
+struct userq_props { u64 wptr_gpu_addr; };
+struct amdgpu_usermode_queue { struct amdgpu_vm *vm; struct userq_props *userq_prop;
                               struct amdgpu_userq_obj wptr_obj; };
 struct amdgpu_userq_mgr { int evf_mgr; };
 struct amdgpu_device { int unused; };
@@ -197,8 +206,8 @@ int main(void)
     const u64 base = 0x123450000ULL;
     struct amdgpu_bo_va_mapping mapping = {.start = base >> 12, .last = base >> 12, .bo_va = &bo_va};
     struct amdgpu_vm vm = {.mapping = &mapping};
-    struct { u64 wptr_gpu_addr; } props = {0};
-    struct amdgpu_usermode_queue queue = {.vm = &vm, .userq_prop = (void *)&props};
+    struct userq_props props = {0};
+    struct amdgpu_usermode_queue queue = {.vm = &vm, .userq_prop = &props};
     for (unsigned i = 0; i < 1024; ++i)
         bo.words[i] = 0x1000000000000000ULL + i;
     u64 result = 0;
@@ -261,6 +270,92 @@ int main(void)
     assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == -EIO);
     assert(bo.refs == 0);
     printf("UserQ WPTR: %u offsets, imported buffers and mapping failures passed\n", cases);
+    return 0;
+}
+'''
+
+
+FIRMWARE_HARNESS = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "amdgpu_drm.h"
+#define min(a,b) ((a) < (b) ? (a) : (b))
+struct amdgpu_device { int unused; };
+static int metadata_error;
+static size_t copy_error, copied;
+static unsigned copies, queries;
+static int metadata(void *out, size_t size)
+{ queries++; memset(out, 0xa5, size); return metadata_error; }
+#define GETTER(name, type) \
+static int name(struct amdgpu_device *adev, struct drm_amdgpu_info *info, struct type *out) \
+{ (void)adev; (void)info; return metadata(out, sizeof(*out)); }
+GETTER(amdgpu_userq_metadata_info_gfx, drm_amdgpu_info_uq_metadata_gfx)
+GETTER(amdgpu_userq_metadata_info_compute, drm_amdgpu_info_uq_metadata_compute)
+GETTER(amdgpu_userq_metadata_info_sdma, drm_amdgpu_info_uq_metadata_sdma)
+static size_t copy_to_user(void *out, const void *data, size_t size)
+{
+    copies++;
+    copied = size;
+    if (!size)
+        return 0;
+    if (!out)
+        return size;
+    if (copy_error)
+        return copy_error;
+    memcpy(out, data, size);
+    return 0;
+}
+static int query(struct amdgpu_device *adev, struct drm_amdgpu_info *info, void *out, unsigned size)
+{
+    int ret;
+    switch (info->query) {
+    case AMDGPU_INFO_UQ_FW_AREAS:
+        ACTUAL_CASE
+    default:
+        return -EINVAL;
+    }
+}
+int main(void)
+{
+    struct amdgpu_device adev = {0};
+    struct drm_amdgpu_info info = {.query = AMDGPU_INFO_UQ_FW_AREAS};
+    const unsigned types[] = {AMDGPU_HW_IP_GFX, AMDGPU_HW_IP_COMPUTE, AMDGPU_HW_IP_DMA};
+    const unsigned metadata_size = sizeof(struct drm_amdgpu_info_uq_metadata);
+    const unsigned sizes[] = {0, 1, 8, metadata_size, metadata_size + 4};
+    unsigned char output[sizeof(struct drm_amdgpu_info_uq_metadata) + 4];
+    for (unsigned i = 0; i < 3; i++) {
+        info.query_hw_ip.type = types[i];
+        for (unsigned j = 0; j < 5; j++) {
+            memset(output, 0xcc, sizeof(output));
+            assert(query(&adev, &info, output, sizes[j]) == 0);
+            assert(copied == min(sizes[j], metadata_size));
+            if (copied)
+                assert(output[0] == 0xa5);
+            assert(output[copied] == 0xcc);
+        }
+        assert(query(&adev, &info, NULL, metadata_size) == -EFAULT);
+        assert(query(&adev, &info, NULL, 0) == 0);
+        copy_error = 1;
+        assert(query(&adev, &info, output, metadata_size) == -EFAULT);
+        copy_error = 0;
+        metadata_error = -EOPNOTSUPP;
+        unsigned old_copies = copies;
+        assert(query(&adev, &info, output, metadata_size) == -EOPNOTSUPP);
+        assert(copies == old_copies);
+        metadata_error = 0;
+    }
+    info.query_hw_ip.type = 99;
+    unsigned old_queries = queries;
+    assert(query(&adev, &info, output, metadata_size) == -EINVAL);
+    info.query = 0xffffffff;
+    assert(query(&adev, &info, output, metadata_size) == -EINVAL);
+    assert(queries == old_queries);
+    puts("UserQ firmware query: GFX, compute and SDMA copy and error cases passed");
     return 0;
 }
 '''
