@@ -121,3 +121,6 @@ drm/amd/pm: Restore UMD profiles after recovery.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/98d6ccf7e48c5141e0eb03cc5da6e5131e25a8d5
 drm/amd/pm: Initialize SMU features before RAS.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/1b7af9e6fbb6b967b717c91eafebf28e08dd9dc7
+drm/amd/pm: Return SMU11 clock errors.
