@@ -250,3 +250,5 @@ b72ede440c56fa32b1eea3a3557c9ea78f3f8df6 drm/amdkfd: Allow SVM unmaps during evi
 54957f0872b1dcda963a79ca4d8af271295bd560 drm/amdgpu: Release failed KFD import resources.
 
 ebaf216661889cf655f27541d5feeec89fbe8714 drm/amdgpu: Release reservations after KFD attach failures.
+
+38e934e88b784ed3189eb6567f2ac741103fbff0 drm/amdgpu/vce: Avoid scheduler fences in direct IB tests.
