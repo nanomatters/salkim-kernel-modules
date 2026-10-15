@@ -115,3 +115,6 @@ drm/amdgpu: Reject unknown metadata operations.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/c57b810a7fbd63cdff117c1b8a73ad1bd335e2b1
 drm/amdgpu: Fail on VCN firmware load errors.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/ad6eb088a508d927641c8a76d1ca7911dfb7c80b
+drm/amd/pm: Restore UMD profiles after recovery.
