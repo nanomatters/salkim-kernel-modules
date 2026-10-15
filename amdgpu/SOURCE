@@ -70,3 +70,7 @@ d2bd6a336ca0 Fix HDMI FRL audio enablement.
 2746e1165a14 Skip HDMI FRL polling while the link is down.
 5dec491a8d86 Recognize the Chrontel CH7218 converter.
 ccc580d56858 Enable HDMI FRL by default.
+
+Upstream AMDGPU fixes:
+Source: https://gitlab.freedesktop.org/drm/amdgpu/kernel.git
+6027db7db773714f2e05df82093276f2a52a1fba Preserve committed SMU 13 OverDrive settings.
