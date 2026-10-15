@@ -74,3 +74,4 @@ ccc580d56858 Enable HDMI FRL by default.
 Upstream AMDGPU fixes:
 Source: https://gitlab.freedesktop.org/drm/amdgpu/kernel.git
 6027db7db773714f2e05df82093276f2a52a1fba Preserve committed SMU 13 OverDrive settings.
+9b0890e72d19b0c430fe62bad290c7c79baa78e4 Preserve committed SMU 14 OverDrive settings.
