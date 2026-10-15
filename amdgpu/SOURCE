@@ -75,3 +75,4 @@ Upstream AMDGPU fixes:
 Source: https://gitlab.freedesktop.org/drm/amdgpu/kernel.git
 6027db7db773714f2e05df82093276f2a52a1fba Preserve committed SMU 13 OverDrive settings.
 9b0890e72d19b0c430fe62bad290c7c79baa78e4 Preserve committed SMU 14 OverDrive settings.
+c1584e10a7deb655438f21867b2b7a356a9aaf9f Release gang fence references on every cleanup path.
