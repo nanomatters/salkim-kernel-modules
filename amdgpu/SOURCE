@@ -214,3 +214,5 @@ e61b299b866e4ff06145a87da304af9a169231f9 drm/amdgpu: Use RSMU registers for NBIO
 7a89ce1a01a06681d1083054f5fb3d54649fc54a drm/amd/display: Define missing CRC engine registers.
 
 822d6320fceebca32d95afb139f8b9eb8d60e125 drm/amdgpu: Finish recovery before restarting schedulers.
+
+4245f9bbcc8183dc56ed598212fd5102befbbfc0 drm/amdgpu: Stop schedulers before reset preparation.
