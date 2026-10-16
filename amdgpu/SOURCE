@@ -296,3 +296,5 @@ dc5fa3ab725298bd96e51554688eec0f481050fb drm/amdgpu/gmc11: Avoid fault registers
 74a1e47aab3f6ed0569b529e3c3611b7f78510c0 drm/amdgpu: Cancel idle work after hardware init failures.
 
 51f9a9e19b94e67d80971bd6de5260d1186f3162 drm/amdgpu: Order JPEG and VCN idle work against reset.
+
+45915b6fed634251924902456b1b84815681eafd drm/amdgpu: Serialize UserQ mapping against reset.

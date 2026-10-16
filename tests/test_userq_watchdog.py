@@ -265,7 +265,12 @@ static void mutex_unlock(struct mutex *lock)
 static struct mutex *guard_mutex_lock(struct mutex *lock)
 { mutex_lock(lock); return lock; }
 static void guard_mutex_cleanup(struct mutex **lock) { mutex_unlock(*lock); }
-#define guard(type) struct mutex *guarded_mutex __attribute__((cleanup(guard_mutex_cleanup))) = guard_mutex_lock
+static _Thread_local unsigned reset_read_depth;
+static int *guard_reset_lock(int *sem) { assert(!reset_read_depth); reset_read_depth++; return sem; }
+static void guard_reset_cleanup(int **sem) { (void)sem; assert(reset_read_depth == 1); reset_read_depth--; }
+#define guard_mutex struct mutex *guarded_mutex __attribute__((cleanup(guard_mutex_cleanup))) = guard_mutex_lock
+#define guard_rwsem_read int *guarded_reset __attribute__((cleanup(guard_reset_cleanup))) = guard_reset_lock
+#define guard(type) guard_##type
 
 struct work_struct { unsigned unused; };
 struct delayed_work {
@@ -336,7 +341,7 @@ struct xarray {
     spinlock_t lock;
     struct amdgpu_usermode_queue *queues[4];
 };
-struct reset_domain { void *wq; };
+struct reset_domain { void *wq; int sem; };
 struct amdgpu_device {
     const struct amdgpu_userq_funcs *userq_funcs[3];
     struct reset_domain *reset_domain;

@@ -80,7 +80,11 @@ static struct mutex *lock_guard(struct mutex *mutex) { mutex_lock(mutex); return
 static void unlock_guard(struct mutex **mutex) { mutex_unlock(*mutex); }
 #define JOIN_(a,b) a##b
 #define JOIN(a,b) JOIN_(a,b)
-#define guard(type) __attribute__((cleanup(unlock_guard))) struct mutex *JOIN(guard_, __COUNTER__) = lock_guard
+static int *lock_reset_guard(int *sem) { assert(!*sem); ++*sem; return sem; }
+static void unlock_reset_guard(int **sem) { assert(**sem == 1); --**sem; }
+#define guard_mutex __attribute__((cleanup(unlock_guard))) struct mutex *JOIN(guard_, __COUNTER__) = lock_guard
+#define guard_rwsem_read __attribute__((cleanup(unlock_reset_guard))) int *JOIN(guard_, __COUNTER__) = lock_reset_guard
+#define guard(type) guard_##type
 #define dev_err(...) ((void)0)
 #define READ_ONCE(value) (value)
 #define xa_for_each(xa, id, item) \
