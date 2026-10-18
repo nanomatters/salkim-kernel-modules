@@ -77,3 +77,4 @@ Source: https://gitlab.freedesktop.org/drm/amdgpu/kernel.git
 9b0890e72d19b0c430fe62bad290c7c79baa78e4 Preserve committed SMU 14 OverDrive settings.
 c1584e10a7deb655438f21867b2b7a356a9aaf9f Release gang fence references on every cleanup path.
 b456f591f925fbd6b33770d0eec1b51c2f9d41c1 Balance CRTC runtime power references.
+ba4c3c202919405f461a393e823e4b72c8518494 Reject oversized command submission chunks.
