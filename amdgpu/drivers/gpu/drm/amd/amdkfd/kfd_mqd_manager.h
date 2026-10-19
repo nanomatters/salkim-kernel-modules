@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /*
  * Copyright 2014-2022 Advanced Micro Devices, Inc.
  *
@@ -137,6 +138,15 @@ struct mqd_manager {
 	uint32_t mqd_size;
 	uint32_t ctl_stack_size;
 };
+
+/* Keep offset <= size <= wave state offset, as init_mqd() and CP do */
+static inline void kfd_mqd_restore_ctl_stack(u32 *size, u32 *offset, u32 *wg_offset,
+					     u32 ctl_stack_size)
+{
+	*size = ctl_stack_size;
+	*offset = min(*offset, ctl_stack_size);
+	*wg_offset = max(*wg_offset, ctl_stack_size);
+}
 
 struct mqd_user_context_save_area_header {
 	/* Byte offset from start of user context
