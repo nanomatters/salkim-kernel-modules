@@ -226,3 +226,5 @@ ee44c6c0e3035fc3f8974675df051f55ddd5e16b drm/amdgpu: Declare missing firmware fi
 c7fa3e50e328bef82843c91abb41be27c79b0a4e drm/amd/display: Preserve DDC pins owned by AUX.
 
 f209fdf392f3a2393db8346bb168ffd9d8669939 drm/amd/display: Release unused DET before compbuf updates.
+
+f47865d809d512068c562fb51edd7746398dbfe3 drm/amd/display: Guard missing DCN401 OTG pipes.
