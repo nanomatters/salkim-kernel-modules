@@ -228,3 +228,5 @@ c7fa3e50e328bef82843c91abb41be27c79b0a4e drm/amd/display: Preserve DDC pins owne
 f209fdf392f3a2393db8346bb168ffd9d8669939 drm/amd/display: Release unused DET before compbuf updates.
 
 f47865d809d512068c562fb51edd7746398dbfe3 drm/amd/display: Guard missing DCN401 OTG pipes.
+
+24a82689987e8fefa639c8f744751659bc8db6f4 drm/amd/display: Drop idle DCN32 clock requirements.
