@@ -292,3 +292,5 @@ ad11b99ea7bd17d6f0d8d6aa2103ca6d1f9021c6 drm/amdgpu/gfx7: Flush ring-test scratc
 dc5fa3ab725298bd96e51554688eec0f481050fb drm/amdgpu/gmc11: Avoid fault registers during GPU reset.
 
 11a08cd5ab256675e8d9f32aa2720ef656107d9d drm/amdgpu: Keep VKMS modeset callbacks out of GPU reset.
+
+74a1e47aab3f6ed0569b529e3c3611b7f78510c0 drm/amdgpu: Cancel idle work after hardware init failures.
