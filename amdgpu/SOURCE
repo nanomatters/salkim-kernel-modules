@@ -106,3 +106,6 @@ drm/amdgpu: Remove the obsolete firmware mutex.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/b6c6c14aa63a2f76d47185e5046db5d62604aa8b
 drm/amdgpu: Allocate MES query storage during software init.
+
+https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/d6048b741ad18e13f3504632c8f8c74accf5c1e4
+drm/amdgpu: Clear page tables after VM resets.
