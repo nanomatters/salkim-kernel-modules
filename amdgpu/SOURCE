@@ -208,3 +208,5 @@ a2e3d83f5fc88e0c619ffe9dfd3549aa9cefe8bd drm/amdgpu/gfx8: Flush ring-test scratc
 8738156e5f48858005788a243e48bb98a57781e2 drm/amdgpu: Skip VM updates after entity shutdown.
 
 126696959fcaf395c9da256bccfb7681c4521981 drm/amd/pm: Unwind software initialization failures.
+
+e61b299b866e4ff06145a87da304af9a169231f9 drm/amdgpu: Use RSMU registers for NBIO 6.3.2.
