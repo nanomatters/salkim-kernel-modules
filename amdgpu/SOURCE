@@ -218,3 +218,5 @@ e61b299b866e4ff06145a87da304af9a169231f9 drm/amdgpu: Use RSMU registers for NBIO
 4245f9bbcc8183dc56ed598212fd5102befbbfc0 drm/amdgpu: Stop schedulers before reset preparation.
 
 ee44c6c0e3035fc3f8974675df051f55ddd5e16b drm/amdgpu: Declare missing firmware files.
+
+29f8f2aa30732483dc7af5eb2041d93b64373654 drm/amdgpu: Populate cached harvest information.
