@@ -298,3 +298,5 @@ dc5fa3ab725298bd96e51554688eec0f481050fb drm/amdgpu/gmc11: Avoid fault registers
 51f9a9e19b94e67d80971bd6de5260d1186f3162 drm/amdgpu: Order JPEG and VCN idle work against reset.
 
 45915b6fed634251924902456b1b84815681eafd drm/amdgpu: Serialize UserQ mapping against reset.
+
+095aec94f41a7132dc9a761bdef19e4c60271931 drm/amdgpu/gfx12: Keep SPM updates out of GFXOFF.
