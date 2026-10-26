@@ -236,3 +236,5 @@ f5d340a669257bfcc7596c9f07d10e1043aa110b drm/amd/display: Preserve inactive VRR 
 91956ad03e4b132ca167ab7f54927da01dcbd6d7 drm/amd/display: Initialize seamless boot timing limits.
 
 ebacf0a7ce54cba4603345cfa50268242c4989a3 drm/amd/display: Signal PQ in DP FreeSync HDR packets.
+
+516c164fcb0ddb30a1993f1ffe9a8f0f9b3a83da drm/amdgpu: Report MES ring wait timeouts.
