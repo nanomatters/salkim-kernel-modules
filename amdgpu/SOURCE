@@ -200,3 +200,5 @@ drm/amdgpu: Rewrite every mapping after VM reset.
 a2e3d83f5fc88e0c619ffe9dfd3549aa9cefe8bd drm/amdgpu/gfx8: Flush ring-test scratch writes.
 
 9899997aa627a1cda385ff7b711c07ca8e51f53e drm/amdgpu/gfx9: Flush ring-test scratch writes.
+
+8656baecb7d5b1d71366dade0b40057ab371f3a8 drm/amdgpu/gfx10: Flush ring-test scratch writes.
