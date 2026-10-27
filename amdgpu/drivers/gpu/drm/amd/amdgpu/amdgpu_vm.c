@@ -1336,6 +1336,7 @@ void amdgpu_vm_get_memory(struct amdgpu_vm *vm,
 int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 			bool clear)
 {
+	struct amdgpu_vm_update_batch batch;
 	struct amdgpu_bo *bo = bo_va->base.bo;
 	struct amdgpu_vm *vm = bo_va->base.vm;
 	struct amdgpu_bo_va_mapping *mapping;
@@ -1346,8 +1347,8 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 	bool flush_tlb = clear;
 	uint64_t vram_base;
 	uint64_t flags;
-	bool uncached;
-	int r;
+	bool uncached, batching;
+	int r = 0, ret;
 
 	amdgpu_sync_create(&sync);
 	if (clear) {
@@ -1424,6 +1425,14 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 		list_splice_init(&bo_va->valids, &bo_va->invalids);
 	}
 
+	batching = !vm->use_cpu_for_update && !list_empty(&bo_va->invalids);
+	if (batching) {
+		r = amdgpu_vm_update_begin(&batch, adev, vm, false, false,
+					   flush_tlb, !uncached, &sync);
+		if (r)
+			goto error_free;
+	}
+
 	list_for_each_entry(mapping, &bo_va->invalids, list) {
 		uint64_t update_flags = flags;
 
@@ -1441,14 +1450,28 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 
 		trace_amdgpu_vm_bo_update(mapping);
 
-		r = amdgpu_vm_update_range(adev, vm, false, false, flush_tlb,
+		if (batching)
+			r = amdgpu_vm_update_pages(&batch.params, mapping->start,
+					   mapping->last, update_flags,
+					   mapping->offset, vram_base, mem,
+					   pages_addr);
+		else
+			r = amdgpu_vm_update_range(adev, vm, false, false, flush_tlb,
 					   !uncached, &sync, mapping->start,
 					   mapping->last, update_flags,
 					   mapping->offset, vram_base, mem,
 					   pages_addr, last_update);
 		if (r)
-			goto error_free;
+			break;
 	}
+
+	if (batching) {
+		ret = amdgpu_vm_update_end(&batch, last_update);
+		if (!r)
+			r = ret;
+	}
+	if (r)
+		goto error_free;
 
 	/* If the BO is not in its preferred location add it back to
 	 * the evicted list so that it gets validated again on the
