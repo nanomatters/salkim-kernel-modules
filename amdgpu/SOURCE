@@ -240,3 +240,5 @@ ebacf0a7ce54cba4603345cfa50268242c4989a3 drm/amd/display: Signal PQ in DP FreeSy
 516c164fcb0ddb30a1993f1ffe9a8f0f9b3a83da drm/amdgpu: Report MES ring wait timeouts.
 
 c90d7695bde6a6232b207a06b6a3cb3f821b209a drm/amdgpu: Guard unsupported SPI ROM dumps.
+
+b93c05bbc84e17117954f7d44465796431e16ea7 drm/amd/display: Guard unsupported DMUB trace controls.
