@@ -364,9 +364,6 @@ static void amdgpu_gem_object_close(struct drm_gem_object *obj,
 		goto out_fence;
 
 	r = amdgpu_vm_clear_freed(adev, vm, &fence);
-	if (unlikely(r < 0) && !drm_dev_is_unplugged(adev_to_drm(adev)))
-		dev_err(adev->dev, "failed to clear page "
-			"tables on GEM object close (%ld)\n", r);
 	if (fence) {
 		amdgpu_bo_fence(bo, fence, true);
 		dma_fence_put(fence);
