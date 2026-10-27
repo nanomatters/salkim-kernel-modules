@@ -59,6 +59,7 @@ extern "C" {
 #define DRM_AMDGPU_USERQ_WAIT		0x18
 #define DRM_AMDGPU_GEM_LIST_HANDLES	0x19
 #define DRM_AMDGPU_PROC_OPTIONS		0x1A
+#define DRM_AMDGPU_GEM_VA_BATCH		0x1B
 
 #define DRM_IOCTL_AMDGPU_GEM_CREATE	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_CREATE, union drm_amdgpu_gem_create)
 #define DRM_IOCTL_AMDGPU_GEM_MMAP	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_MMAP, union drm_amdgpu_gem_mmap)
@@ -81,6 +82,54 @@ extern "C" {
 #define DRM_IOCTL_AMDGPU_USERQ_WAIT	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_USERQ_WAIT, struct drm_amdgpu_userq_wait)
 #define DRM_IOCTL_AMDGPU_GEM_LIST_HANDLES DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_LIST_HANDLES, struct drm_amdgpu_gem_list_handles)
 #define DRM_IOCTL_AMDGPU_PROC_OPTIONS	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_PROC_OPTIONS, struct drm_amdgpu_proc_options)
+#define DRM_IOCTL_AMDGPU_GEM_VA_BATCH \
+	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_VA_BATCH, struct drm_amdgpu_gem_va_batch)
+
+/* Local, versioned ABI: probe INFO first; never infer support from DRM minor. */
+#define AMDGPU_INFO_GEM_VA_BATCH		0x53414c42
+#define AMDGPU_GEM_VA_BATCH_COOKIE	0x53414c4b56414201ULL
+#define AMDGPU_GEM_VA_BATCH_MAX_OPS	4096
+
+struct drm_amdgpu_info_gem_va_batch {
+	__u64 cookie;
+	__u32 max_ops;
+	__u32 reserved;
+};
+
+/* REPLACE operations, in array order. PRT with handle 0 unbinds a range.
+ * DELAY_UPDATE is not accepted: the batch applies all its pending mappings.
+ */
+struct drm_amdgpu_gem_va_batch_op {
+	__u32 handle;
+	__u32 flags;
+	__u64 va_address;
+	__u64 offset_in_bo;
+	__u64 map_size;
+};
+
+/* This is vector transport with legacy VM dependencies, not async VM_BIND.
+ * All fields except cookie, operations and count must initially be zero.
+ * Negative ioctl return before mutation leaves mappings unchanged. A copyout
+ * fault is ambiguous: userspace must not retry it or replay through GEM_VA.
+ *
+ * Once mappings change, ioctl returns 0 with applied == count. There is
+ * no rollback or safe replay. status == 0 means PTE/PDE updates were
+ * submitted or left pending for CS validation, as with GEM_VA. Allocation
+ * failures and interrupted update waits also leave updates pending and
+ * return status == 0. Other update failures return a negative status.
+ * Acceptance is not GPU completion.
+ * Normal CS dependencies and TLB-invalidation rules remain in effect.
+ * No userspace semaphore is signaled by this ioctl.
+ */
+struct drm_amdgpu_gem_va_batch {
+	__u64 cookie;
+	__u64 operations;
+	__u32 count;
+	__u32 flags;
+	__u32 applied;
+	__s32 status;
+	__u64 reserved[2];
+};
 
 /**
  * DOC: memory domains

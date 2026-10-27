@@ -673,6 +673,18 @@ int amdgpu_info_ioctl(struct drm_device *dev, void *data, struct drm_file *filp)
 		return -EINVAL;
 
 	switch (info->query) {
+	case AMDGPU_INFO_GEM_VA_BATCH: {
+		struct drm_amdgpu_info_gem_va_batch caps = {
+			.cookie = AMDGPU_GEM_VA_BATCH_COOKIE,
+			.max_ops = AMDGPU_GEM_VA_BATCH_MAX_OPS,
+		};
+
+		fpriv = filp->driver_priv;
+		if (adev->debug_vm || fpriv->vm.use_cpu_for_update)
+			return -EOPNOTSUPP;
+		return copy_to_user(out, &caps, min_t(u32, size, sizeof(caps))) ?
+			-EFAULT : 0;
+	}
 	case AMDGPU_INFO_ACCEL_WORKING:
 		ui32 = adev->accel_working;
 		return copy_to_user(out, &ui32, min(size, 4u)) ? -EFAULT : 0;

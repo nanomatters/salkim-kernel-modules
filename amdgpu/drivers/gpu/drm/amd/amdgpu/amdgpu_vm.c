@@ -1932,7 +1932,7 @@ static void amdgpu_vm_bo_insert_map(struct amdgpu_device *adev,
 }
 
 /* Validate operation parameters to prevent potential abuse */
-static int amdgpu_vm_verify_parameters(struct amdgpu_device *adev,
+int amdgpu_vm_verify_parameters(struct amdgpu_device *adev,
 					  struct amdgpu_bo *bo,
 					  uint64_t saddr,
 					  uint64_t offset,
@@ -2139,45 +2139,32 @@ int amdgpu_vm_bo_unmap(struct amdgpu_device *adev,
 }
 
 /**
- * amdgpu_vm_bo_clear_mappings - remove all mappings in a specific range
+ * amdgpu_vm_bo_clear_mappings_prealloc - clear a validated range
  *
  * @adev: amdgpu_device pointer
  * @vm: VM structure to use
  * @saddr: start of the range
  * @size: size of the range
+ * @before: prepared record for the surviving prefix
+ * @after: prepared record for the surviving suffix
  *
  * Remove all mappings in a range, split them as appropriate.
  *
- * Returns:
- * 0 for success, error for failure.
+ * Consumes both records, retaining used splits and freeing unused ones.
  */
-int amdgpu_vm_bo_clear_mappings(struct amdgpu_device *adev,
-				struct amdgpu_vm *vm,
-				uint64_t saddr, uint64_t size)
+static void amdgpu_vm_bo_clear_mappings_prealloc(struct amdgpu_device *adev,
+				struct amdgpu_vm *vm, uint64_t saddr, uint64_t size,
+				struct amdgpu_bo_va_mapping *before,
+				struct amdgpu_bo_va_mapping *after)
 {
-	struct amdgpu_bo_va_mapping *before, *after, *tmp, *next;
+	struct amdgpu_bo_va_mapping *tmp, *next;
 	LIST_HEAD(removed);
 	uint64_t eaddr;
-	int r;
-
-	r = amdgpu_vm_verify_parameters(adev, NULL, saddr, 0, size);
-	if (r)
-		return r;
 
 	saddr /= AMDGPU_GPU_PAGE_SIZE;
 	eaddr = saddr + (size - 1) / AMDGPU_GPU_PAGE_SIZE;
 
-	/* Allocate all the needed memory */
-	before = kzalloc_obj(*before);
-	if (!before)
-		return -ENOMEM;
 	INIT_LIST_HEAD(&before->list);
-
-	after = kzalloc_obj(*after);
-	if (!after) {
-		kfree(before);
-		return -ENOMEM;
-	}
 	INIT_LIST_HEAD(&after->list);
 
 	/* Now gather all removed mappings */
@@ -2254,8 +2241,43 @@ int amdgpu_vm_bo_clear_mappings(struct amdgpu_device *adev,
 	} else {
 		kfree(after);
 	}
+}
 
+int amdgpu_vm_bo_clear_mappings(struct amdgpu_device *adev,
+			       struct amdgpu_vm *vm, uint64_t saddr, uint64_t size)
+{
+	struct amdgpu_bo_va_mapping *before, *after;
+	int r = amdgpu_vm_verify_parameters(adev, NULL, saddr, 0, size);
+
+	if (r)
+		return r;
+	before = kzalloc_obj(*before);
+	if (!before)
+		return -ENOMEM;
+	after = kzalloc_obj(*after);
+	if (!after) {
+		kfree(before);
+		return -ENOMEM;
+	}
+	amdgpu_vm_bo_clear_mappings_prealloc(adev, vm, saddr, size, before, after);
 	return 0;
+}
+
+/* Parameters are validated and all three records allocated before mutation. */
+void amdgpu_vm_bo_replace_map_prealloc(struct amdgpu_device *adev,
+		struct amdgpu_bo_va *bo_va, uint64_t saddr, uint64_t offset,
+		uint64_t size, uint32_t flags, struct amdgpu_bo_va_mapping **maps)
+{
+	struct amdgpu_bo_va_mapping *mapping = maps[0];
+
+	amdgpu_vm_bo_clear_mappings_prealloc(adev, bo_va->base.vm, saddr, size,
+					   maps[1], maps[2]);
+	mapping->start = saddr / AMDGPU_GPU_PAGE_SIZE;
+	mapping->last = mapping->start + (size - 1) / AMDGPU_GPU_PAGE_SIZE;
+	mapping->offset = offset;
+	mapping->flags = flags;
+	amdgpu_vm_bo_insert_map(adev, bo_va, mapping);
+	maps[0] = maps[1] = maps[2] = NULL;
 }
 
 /**
