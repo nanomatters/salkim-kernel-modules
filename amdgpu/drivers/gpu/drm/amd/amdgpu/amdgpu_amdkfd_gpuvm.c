@@ -1277,6 +1277,7 @@ static int unmap_bo_from_gpuvm(struct kgd_mem *mem,
 	struct amdgpu_bo_va *bo_va = entry->bo_va;
 	struct amdgpu_device *adev = entry->adev;
 	struct amdgpu_vm *vm = bo_va->base.vm;
+	int ret;
 
 	if (bo_va->queue_refcount) {
 		pr_debug("bo_va->queue_refcount %d\n", bo_va->queue_refcount);
@@ -1289,13 +1290,13 @@ static int unmap_bo_from_gpuvm(struct kgd_mem *mem,
 	if (!amdgpu_vm_ready(vm))
 		return 0;
 
-	(void)amdgpu_vm_clear_freed(adev, vm, &bo_va->last_pt_update);
+	ret = amdgpu_vm_clear_freed(adev, vm, &bo_va->last_pt_update);
 
 	(void)amdgpu_sync_fence(sync, bo_va->last_pt_update, GFP_KERNEL);
 	if (amdgpu_sync_fence(sync, vm->last_tlb_inv, GFP_KERNEL))
 		dma_fence_wait(vm->last_tlb_inv, false);
 
-	return 0;
+	return ret;
 }
 
 static int update_gpuvm_pte(struct kgd_mem *mem,
