@@ -90,10 +90,18 @@ extern "C" {
 #define AMDGPU_GEM_VA_BATCH_COOKIE	0x53414c4b56414201ULL
 #define AMDGPU_GEM_VA_BATCH_MAX_OPS	4096
 
+/* The caller has completed the dependencies of the replaced ranges.
+ * Eligible retirements may omit implicit rendering waits. CS update waits,
+ * movement dependencies and invalidation rules are unchanged.
+ */
+#define AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE	(1U << 0)
+
 struct drm_amdgpu_info_gem_va_batch {
 	__u64 cookie;
 	__u32 max_ops;
 	__u32 reserved;
+	/* Optional extension: zero the query buffer before probing older kernels. */
+	__u64 features;
 };
 
 /* REPLACE operations, in array order. PRT with handle 0 unbinds a range.
@@ -107,8 +115,9 @@ struct drm_amdgpu_gem_va_batch_op {
 	__u64 map_size;
 };
 
-/* This is vector transport with legacy VM dependencies, not async VM_BIND.
- * All fields except cookie, operations and count must initially be zero.
+/* This is vector transport, not async VM_BIND. With flags == 0, legacy VM
+ * dependencies are preserved. Optional flags must be advertised in features.
+ * All fields except cookie, operations, count and flags must initially be zero.
  * Negative ioctl return before mutation leaves mappings unchanged. A copyout
  * fault is ambiguous: userspace must not retry it or replay through GEM_VA.
  *

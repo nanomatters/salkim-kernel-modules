@@ -525,6 +525,9 @@ int amdgpu_vm_update_pdes(struct amdgpu_device *adev,
 int amdgpu_vm_clear_freed(struct amdgpu_device *adev,
 			  struct amdgpu_vm *vm,
 			  struct dma_fence **fence);
+int amdgpu_vm_clear_freed_list(struct amdgpu_device *adev, struct amdgpu_vm *vm,
+			     struct list_head *freed, enum amdgpu_sync_mode mode,
+			     struct dma_fence **fence);
 int amdgpu_vm_handle_moved(struct amdgpu_device *adev,
 			   struct amdgpu_vm *vm,
 			   struct ww_acquire_ctx *ticket);
@@ -572,7 +575,7 @@ int amdgpu_vm_verify_parameters(struct amdgpu_device *adev, struct amdgpu_bo *bo
 void amdgpu_vm_bo_replace_map_prealloc(struct amdgpu_device *adev,
 		struct amdgpu_bo_va *bo_va, uint64_t addr, uint64_t offset,
 		uint64_t size, uint32_t flags, struct amdgpu_bo_va_mapping **maps,
-		struct list_head *freed);
+		struct list_head *freed, bool *explicit_sync);
 int amdgpu_vm_bo_unmap(struct amdgpu_device *adev,
 		       struct amdgpu_bo_va *bo_va,
 		       uint64_t addr);
