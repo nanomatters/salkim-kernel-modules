@@ -304,3 +304,5 @@ dc5fa3ab725298bd96e51554688eec0f481050fb drm/amdgpu/gmc11: Avoid fault registers
 022bf812e98d28a36b99fe05a603a5cb4a3c5325 drm/amdgpu/uvd: Keep direct IB tests free of BO locks.
 
 728fc71e2ac874bd1fcfe91ad8f2ccf652df0cd7 drm/amdgpu: Clear Navi10 interrupt overflow on enable.
+
+b60d53a549f7c6488c1a6112891f2f45165afec4 drm/amd/display: Round VM stage groups before truncation.
