@@ -1526,6 +1526,16 @@ static void amdgpu_vm_bo_update_done(struct amdgpu_bo_va *bo_va, bool clear)
 int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 			bool clear)
 {
+	struct amdgpu_vm *vm = bo_va->base.vm;
+	int r;
+
+	/* A retried clear must not erase a replacement mapping. */
+	if (!clear && !list_empty(&vm->freed)) {
+		r = amdgpu_vm_clear_freed(adev, vm, &vm->last_update);
+		if (r)
+			return r;
+	}
+
 	return amdgpu_vm_bo_update_internal(adev, bo_va, clear, NULL);
 }
 

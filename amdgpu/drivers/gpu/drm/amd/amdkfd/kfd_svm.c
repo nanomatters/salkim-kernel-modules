@@ -1483,6 +1483,11 @@ svm_range_map_to_gpu(struct kfd_process_device *pdd, struct svm_range *prange,
 		return -EINVAL;
 	}
 
+	/* SVM writes PTEs directly, bypassing amdgpu_vm_bo_update(). */
+	r = amdgpu_vm_clear_freed(adev, vm, &vm->last_update);
+	if (r)
+		return r;
+
 	for (i = offset; i < offset + npages; i++) {
 		uint64_t gpu_start;
 		uint64_t gpu_end;
