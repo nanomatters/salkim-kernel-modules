@@ -2244,6 +2244,7 @@ int amdgpu_vm_bo_unmap(struct amdgpu_device *adev,
  * @size: size of the range
  * @before: prepared record for the surviving prefix
  * @after: prepared record for the surviving suffix
+ * @freed: destination for mappings requiring GPU retirement
  *
  * Remove all mappings in a range, split them as appropriate.
  *
@@ -2252,7 +2253,8 @@ int amdgpu_vm_bo_unmap(struct amdgpu_device *adev,
 static void amdgpu_vm_bo_clear_mappings_prealloc(struct amdgpu_device *adev,
 				struct amdgpu_vm *vm, uint64_t saddr, uint64_t size,
 				struct amdgpu_bo_va_mapping *before,
-				struct amdgpu_bo_va_mapping *after)
+				struct amdgpu_bo_va_mapping *after,
+				struct list_head *freed)
 {
 	struct amdgpu_bo_va_mapping *tmp, *next;
 	LIST_HEAD(removed);
@@ -2305,7 +2307,7 @@ static void amdgpu_vm_bo_clear_mappings_prealloc(struct amdgpu_device *adev,
 		    tmp->last = eaddr;
 
 		tmp->bo_va = NULL;
-		list_add(&tmp->list, &vm->freed);
+		list_add(&tmp->list, freed);
 		trace_amdgpu_vm_bo_unmap(NULL, tmp);
 	}
 
@@ -2356,19 +2358,21 @@ int amdgpu_vm_bo_clear_mappings(struct amdgpu_device *adev,
 		kfree(before);
 		return -ENOMEM;
 	}
-	amdgpu_vm_bo_clear_mappings_prealloc(adev, vm, saddr, size, before, after);
+	amdgpu_vm_bo_clear_mappings_prealloc(adev, vm, saddr, size, before, after,
+					   &vm->freed);
 	return 0;
 }
 
 /* Parameters are validated and all three records allocated before mutation. */
 void amdgpu_vm_bo_replace_map_prealloc(struct amdgpu_device *adev,
 		struct amdgpu_bo_va *bo_va, uint64_t saddr, uint64_t offset,
-		uint64_t size, uint32_t flags, struct amdgpu_bo_va_mapping **maps)
+		uint64_t size, uint32_t flags, struct amdgpu_bo_va_mapping **maps,
+		struct list_head *freed)
 {
 	struct amdgpu_bo_va_mapping *mapping = maps[0];
 
 	amdgpu_vm_bo_clear_mappings_prealloc(adev, bo_va->base.vm, saddr, size,
-					   maps[1], maps[2]);
+					   maps[1], maps[2], freed);
 	mapping->start = saddr / AMDGPU_GPU_PAGE_SIZE;
 	mapping->last = mapping->start + (size - 1) / AMDGPU_GPU_PAGE_SIZE;
 	mapping->offset = offset;

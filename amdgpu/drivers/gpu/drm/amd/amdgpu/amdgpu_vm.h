@@ -571,7 +571,8 @@ int amdgpu_vm_verify_parameters(struct amdgpu_device *adev, struct amdgpu_bo *bo
 			       uint64_t addr, uint64_t offset, uint64_t size);
 void amdgpu_vm_bo_replace_map_prealloc(struct amdgpu_device *adev,
 		struct amdgpu_bo_va *bo_va, uint64_t addr, uint64_t offset,
-		uint64_t size, uint32_t flags, struct amdgpu_bo_va_mapping **maps);
+		uint64_t size, uint32_t flags, struct amdgpu_bo_va_mapping **maps,
+		struct list_head *freed);
 int amdgpu_vm_bo_unmap(struct amdgpu_device *adev,
 		       struct amdgpu_bo_va *bo_va,
 		       uint64_t addr);
