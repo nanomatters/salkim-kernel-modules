@@ -304,6 +304,11 @@ struct amdgpu_vm_update_params {
 	struct amdgpu_job *job;
 
 	/**
+	 * @last_fence: completion of the last SDMA job submitted by this update
+	 */
+	struct dma_fence *last_fence;
+
+	/**
 	 * @num_dw_left: number of dw left for the IB
 	 */
 	unsigned int num_dw_left;
