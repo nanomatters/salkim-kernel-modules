@@ -1534,25 +1534,28 @@ static bool amdgpu_vm_bo_can_batch(struct amdgpu_vm *vm,
 {
 	struct amdgpu_bo *bo = bo_va->base.bo;
 
-	return !vm->use_cpu_for_update && amdgpu_vm_is_bo_always_valid(vm, bo) &&
-		!drm_gem_is_imported(&bo->tbo.base) &&
+	return !vm->use_cpu_for_update &&
+		(!bo || (amdgpu_vm_is_bo_always_valid(vm, bo) &&
+			 !drm_gem_is_imported(&bo->tbo.base))) &&
 		(bo_va->base.moved || bo_va->cleared || !list_empty(&bo_va->invalids));
 }
 
-/* Share a submission only for native BOs with the root reservation. */
+/* Share a submission for PRT mappings and native BOs with the root reservation. */
 int amdgpu_vm_bo_update_batch(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 			      struct xarray *bos)
 {
 	struct amdgpu_vm_update_batch batch;
-	struct amdgpu_bo_va *bo_va;
+	struct amdgpu_bo_va *bo_va, *prt_va = NULL;
+	struct dma_fence *fence = NULL;
 	struct amdgpu_sync sync;
 	unsigned long index;
-	bool pending = false;
-	int r, ret;
+	bool pending = false, sync_bos = false;
+	int r = 0, ret;
 
 	xa_for_each(bos, index, bo_va) {
 		if (amdgpu_vm_bo_can_batch(vm, bo_va)) {
 			pending = true;
+			sync_bos |= bo_va->base.bo != NULL;
 			continue;
 		}
 		r = amdgpu_vm_bo_update(adev, bo_va, false);
@@ -1563,8 +1566,9 @@ int amdgpu_vm_bo_update_batch(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 		return 0;
 
 	amdgpu_sync_create(&sync);
-	r = amdgpu_sync_resv(adev, &sync, vm->root.bo->tbo.base.resv,
-			     AMDGPU_SYNC_EXPLICIT, vm);
+	if (sync_bos)
+		r = amdgpu_sync_resv(adev, &sync, vm->root.bo->tbo.base.resv,
+				     AMDGPU_SYNC_EXPLICIT, vm);
 	if (!r)
 		r = amdgpu_vm_update_begin(&batch, adev, vm, false, false,
 					   false, false, &sync);
@@ -1575,11 +1579,22 @@ int amdgpu_vm_bo_update_batch(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	xa_for_each(bos, index, bo_va) {
 		if (!amdgpu_vm_bo_can_batch(vm, bo_va))
 			continue;
+		if (!bo_va->base.bo)
+			prt_va = bo_va;
 		r = amdgpu_vm_bo_update_internal(adev, bo_va, false, &batch);
 		if (r)
 			break;
 	}
-	ret = amdgpu_vm_update_end(&batch, &vm->last_update);
+	ret = amdgpu_vm_update_end(&batch, &fence);
+	if (fence) {
+		dma_fence_put(vm->last_update);
+		vm->last_update = fence;
+		/* Publish submitted PRT work even when a later range failed. */
+		if (prt_va) {
+			dma_fence_put(prt_va->last_pt_update);
+			prt_va->last_pt_update = dma_fence_get(fence);
+		}
+	}
 	if (r || ret)
 		return r ?: ret;
 
