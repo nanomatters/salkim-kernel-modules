@@ -998,7 +998,7 @@ int amdgpu_vm_update_pdes(struct amdgpu_device *adev,
 	struct amdgpu_vm_update_params params;
 	struct amdgpu_vm_bo_base *entry, *tmp;
 	bool flush_tlb_needed = false;
-	int r, idx;
+	int r, ret, idx;
 
 	amdgpu_vm_assert_locked(vm);
 
@@ -1024,15 +1024,17 @@ int amdgpu_vm_update_pdes(struct amdgpu_device *adev,
 
 		r = amdgpu_vm_pde_update(&params, entry);
 		if (r)
-			goto error;
+			break;
 	}
 
-	r = vm->update_funcs->commit(&params, &vm->last_update);
-	if (r)
-		goto error;
+	ret = vm->update_funcs->commit(&params, &vm->last_update);
+	if (!r)
+		r = ret;
 
 	if (flush_tlb_needed)
 		atomic64_inc(&vm->tlb_seq);
+	if (r)
+		goto error;
 
 	list_for_each_entry_safe(entry, tmp, &vm->kernel.needs_update,
 				 vm_status)
@@ -1134,7 +1136,7 @@ int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	struct amdgpu_vm_tlb_seq_struct *tlb_cb;
 	struct amdgpu_vm_update_params params;
 	struct amdgpu_res_cursor cursor;
-	int r, idx;
+	int r, ret, idx;
 
 	if (!drm_dev_enter(adev_to_drm(adev), &idx))
 		return -ENODEV;
@@ -1233,14 +1235,17 @@ int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 		tmp = start + num_entries;
 		r = amdgpu_vm_ptes_update(&params, start, tmp, addr, flags);
 		if (r)
-			goto error_free;
+			break;
 
 		amdgpu_res_next(&cursor, num_entries * AMDGPU_GPU_PAGE_SIZE);
 		start = tmp;
 	}
 
-	r = vm->update_funcs->commit(&params, fence);
-	if (r)
+	/* Publish any queued prefix, including when a later range failed. */
+	ret = vm->update_funcs->commit(&params, fence);
+	if (!r)
+		r = ret;
+	if (ret)
 		goto error_free;
 
 	if (params.needs_flush) {
