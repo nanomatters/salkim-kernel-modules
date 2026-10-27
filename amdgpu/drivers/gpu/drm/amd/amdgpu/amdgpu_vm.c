@@ -1101,49 +1101,29 @@ amdgpu_vm_tlb_flush(struct amdgpu_vm_update_params *params,
 	}
 }
 
-/**
- * amdgpu_vm_update_range - update a range in the vm page table
- *
- * @adev: amdgpu_device pointer to use for commands
- * @vm: the VM to update the range
- * @immediate: immediate submission in a page fault
- * @unlocked: unlocked invalidation during MM callback
- * @flush_tlb: trigger tlb invalidation after update completed
- * @allow_override: change MTYPE for local NUMA nodes
- * @sync: fences we need to sync to
- * @start: start of mapped range
- * @last: last mapped entry
- * @flags: flags for the entries
- * @offset: offset into nodes and pages_addr
- * @vram_base: base for vram mappings
- * @res: ttm_resource to map
- * @pages_addr: DMA addresses to use for mapping
- * @fence: optional resulting fence
- *
- * Fill in the page table entries between @start and @last.
- *
- * Returns:
- * 0 for success, negative erro code for failure.
- */
-int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
-			   bool immediate, bool unlocked, bool flush_tlb,
-			   bool allow_override, struct amdgpu_sync *sync,
-			   uint64_t start, uint64_t last, uint64_t flags,
-			   uint64_t offset, uint64_t vram_base,
-			   struct ttm_resource *res, dma_addr_t *pages_addr,
-			   struct dma_fence **fence)
-{
-	struct amdgpu_vm_tlb_seq_struct *tlb_cb;
+struct amdgpu_vm_update_batch {
 	struct amdgpu_vm_update_params params;
-	struct amdgpu_res_cursor cursor;
-	int r, ret, idx;
+	struct amdgpu_vm_tlb_seq_struct *tlb_cb;
+	int idx;
+};
 
-	if (!drm_dev_enter(adev_to_drm(adev), &idx))
+static int amdgpu_vm_update_begin(struct amdgpu_vm_update_batch *batch,
+				  struct amdgpu_device *adev,
+				  struct amdgpu_vm *vm, bool immediate,
+				  bool unlocked, bool flush_tlb,
+				  bool allow_override, struct amdgpu_sync *sync)
+{
+	struct amdgpu_vm_update_params *params = &batch->params;
+	int r;
+
+	memset(batch, 0, sizeof(*batch));
+
+	if (!drm_dev_enter(adev_to_drm(adev), &batch->idx))
 		return -ENODEV;
 
-	tlb_cb = kmalloc_obj(*tlb_cb);
-	if (!tlb_cb) {
-		drm_dev_exit(idx);
+	batch->tlb_cb = kmalloc_obj(*batch->tlb_cb);
+	if (!batch->tlb_cb) {
+		drm_dev_exit(batch->idx);
 		return -ENOMEM;
 	}
 
@@ -1158,15 +1138,13 @@ int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	 */
 	flush_tlb |= amdgpu_ip_version(adev, GC_HWIP, 0) < IP_VERSION(9, 0, 0);
 
-	memset(&params, 0, sizeof(params));
-	params.adev = adev;
-	params.vm = vm;
-	params.immediate = immediate;
-	params.pages_addr = pages_addr;
-	params.unlocked = unlocked;
-	params.needs_flush = flush_tlb;
-	params.override_pte = allow_override && adev->gmc.override_pte;
-	INIT_LIST_HEAD(&params.tlb_flush_waitlist);
+	params->adev = adev;
+	params->vm = vm;
+	params->immediate = immediate;
+	params->unlocked = unlocked;
+	params->needs_flush = flush_tlb;
+	params->override_pte = allow_override && adev->gmc.override_pte;
+	INIT_LIST_HEAD(&params->tlb_flush_waitlist);
 
 	amdgpu_vm_eviction_lock(vm);
 	if (vm->evicting) {
@@ -1182,11 +1160,30 @@ int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 		dma_fence_put(tmp);
 	}
 
-	r = vm->update_funcs->prepare(&params, sync,
+	r = vm->update_funcs->prepare(params, sync,
 				      AMDGPU_KERNEL_JOB_ID_VM_UPDATE_RANGE);
 	if (r)
 		goto error_free;
 
+	return 0;
+
+error_free:
+	kfree(batch->tlb_cb);
+	amdgpu_vm_eviction_unlock(vm);
+	drm_dev_exit(batch->idx);
+	return r;
+}
+
+static int amdgpu_vm_update_pages(struct amdgpu_vm_update_params *params,
+				  uint64_t start, uint64_t last, uint64_t flags,
+				  uint64_t offset, uint64_t vram_base,
+				  struct ttm_resource *res, dma_addr_t *pages_addr)
+{
+	struct amdgpu_device *adev = params->adev;
+	struct amdgpu_res_cursor cursor;
+	int r;
+
+	params->pages_addr = pages_addr;
 	amdgpu_res_first(pages_addr ? NULL : res, offset,
 			 (last - start + 1) * AMDGPU_GPU_PAGE_SIZE, &cursor);
 	while (cursor.remaining) {
@@ -1220,10 +1217,10 @@ int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 
 			if (!contiguous) {
 				addr = cursor.start;
-				params.pages_addr = pages_addr;
+				params->pages_addr = pages_addr;
 			} else {
 				addr = pages_addr[cursor.start >> PAGE_SHIFT];
-				params.pages_addr = NULL;
+				params->pages_addr = NULL;
 			}
 
 		} else if (flags & (AMDGPU_PTE_VALID | AMDGPU_PTE_PRT_FLAG(adev))) {
@@ -1233,33 +1230,87 @@ int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 		}
 
 		tmp = start + num_entries;
-		r = amdgpu_vm_ptes_update(&params, start, tmp, addr, flags);
+		r = amdgpu_vm_ptes_update(params, start, tmp, addr, flags);
 		if (r)
-			break;
+			return r;
 
 		amdgpu_res_next(&cursor, num_entries * AMDGPU_GPU_PAGE_SIZE);
 		start = tmp;
 	}
 
+	return 0;
+}
+
+static int amdgpu_vm_update_end(struct amdgpu_vm_update_batch *batch,
+				struct dma_fence **fence)
+{
+	struct amdgpu_vm_update_params *params = &batch->params;
+	struct amdgpu_vm *vm = params->vm;
+	int r;
+
 	/* Publish any queued prefix, including when a later range failed. */
-	ret = vm->update_funcs->commit(&params, fence);
-	if (!r)
-		r = ret;
-	if (ret)
+	r = vm->update_funcs->commit(params, fence);
+	if (r)
 		goto error_free;
 
-	if (params.needs_flush) {
-		amdgpu_vm_tlb_flush(&params, fence ? *fence : NULL, tlb_cb);
-		tlb_cb = NULL;
+	if (params->needs_flush) {
+		amdgpu_vm_tlb_flush(params, fence ? *fence : NULL, batch->tlb_cb);
+		batch->tlb_cb = NULL;
 	}
 
-	amdgpu_vm_pt_free_list(adev, &params);
+	amdgpu_vm_pt_free_list(params->adev, params);
 
 error_free:
-	kfree(tlb_cb);
+	kfree(batch->tlb_cb);
 	amdgpu_vm_eviction_unlock(vm);
-	drm_dev_exit(idx);
+	drm_dev_exit(batch->idx);
 	return r;
+}
+
+/**
+ * amdgpu_vm_update_range - update a range in the vm page table
+ *
+ * @adev: amdgpu_device pointer to use for commands
+ * @vm: the VM to update the range
+ * @immediate: immediate submission in a page fault
+ * @unlocked: unlocked invalidation during MM callback
+ * @flush_tlb: trigger tlb invalidation after update completed
+ * @allow_override: change MTYPE for local NUMA nodes
+ * @sync: fences we need to sync to
+ * @start: start of mapped range
+ * @last: last mapped entry
+ * @flags: flags for the entries
+ * @offset: offset into nodes and pages_addr
+ * @vram_base: base for vram mappings
+ * @res: ttm_resource to map
+ * @pages_addr: DMA addresses to use for mapping
+ * @fence: optional resulting fence
+ *
+ * Fill in the page table entries between @start and @last.
+ *
+ * Returns:
+ * 0 for success, negative erro code for failure.
+ */
+int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
+			   bool immediate, bool unlocked, bool flush_tlb,
+			   bool allow_override, struct amdgpu_sync *sync,
+			   uint64_t start, uint64_t last, uint64_t flags,
+			   uint64_t offset, uint64_t vram_base,
+			   struct ttm_resource *res, dma_addr_t *pages_addr,
+			   struct dma_fence **fence)
+{
+	struct amdgpu_vm_update_batch batch;
+	int r, ret;
+
+	r = amdgpu_vm_update_begin(&batch, adev, vm, immediate, unlocked,
+				   flush_tlb, allow_override, sync);
+	if (r)
+		return r;
+
+	r = amdgpu_vm_update_pages(&batch.params, start, last, flags, offset,
+				   vram_base, res, pages_addr);
+	ret = amdgpu_vm_update_end(&batch, fence);
+	return r ? r : ret;
 }
 
 void amdgpu_vm_get_memory(struct amdgpu_vm *vm,
