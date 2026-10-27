@@ -1657,10 +1657,13 @@ int amdgpu_vm_clear_freed(struct amdgpu_device *adev,
 			  struct amdgpu_vm *vm,
 			  struct dma_fence **fence)
 {
-	struct amdgpu_bo_va_mapping *mapping;
+	struct amdgpu_bo_va_mapping *mapping, *tmp;
+	struct amdgpu_vm_update_batch batch;
+	LIST_HEAD(cleared);
 	struct dma_fence *f = NULL;
 	struct amdgpu_sync sync;
-	int r;
+	bool batching = !vm->use_cpu_for_update;
+	int r, ret;
 
 	if (list_empty(&vm->freed))
 		return 0;
@@ -1675,17 +1678,43 @@ int amdgpu_vm_clear_freed(struct amdgpu_device *adev,
 	if (r)
 		goto error_free;
 
-	while (!list_empty(&vm->freed)) {
-		mapping = list_first_entry(&vm->freed,
-			struct amdgpu_bo_va_mapping, list);
+	if (batching) {
+		r = amdgpu_vm_update_begin(&batch, adev, vm, false, false,
+					   true, false, &sync);
+		if (r)
+			goto error_free;
+	}
 
-		r = amdgpu_vm_update_range(adev, vm, false, false, true, false,
+	list_for_each_entry_safe(mapping, tmp, &vm->freed, list) {
+		if (batching)
+			r = amdgpu_vm_update_pages(&batch.params, mapping->start,
+					   mapping->last, 0, 0, 0, NULL, NULL);
+		else
+			r = amdgpu_vm_update_range(adev, vm, false, false, true, false,
 					   &sync, mapping->start, mapping->last,
 					   0, 0, 0, NULL, NULL, &f);
 		if (r)
 			break;
-		list_del(&mapping->list);
-		amdgpu_vm_free_mapping(adev, vm, mapping, f);
+		if (batching) {
+			list_move_tail(&mapping->list, &cleared);
+		} else {
+			list_del(&mapping->list);
+			amdgpu_vm_free_mapping(adev, vm, mapping, f);
+		}
+	}
+
+	if (batching) {
+		ret = amdgpu_vm_update_end(&batch, &f);
+		if (ret) {
+			list_splice_init(&cleared, &vm->freed);
+		} else {
+			list_for_each_entry_safe(mapping, tmp, &cleared, list) {
+				list_del(&mapping->list);
+				amdgpu_vm_free_mapping(adev, vm, mapping, f);
+			}
+		}
+		if (!r)
+			r = ret;
 	}
 
 	/* Preserve the fence for earlier successful clears on error. */
