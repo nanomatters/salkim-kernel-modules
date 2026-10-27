@@ -306,3 +306,5 @@ dc5fa3ab725298bd96e51554688eec0f481050fb drm/amdgpu/gmc11: Avoid fault registers
 728fc71e2ac874bd1fcfe91ad8f2ccf652df0cd7 drm/amdgpu: Clear Navi10 interrupt overflow on enable.
 
 b60d53a549f7c6488c1a6112891f2f45165afec4 drm/amd/display: Round VM stage groups before truncation.
+
+92e1712ea48b198b019c24c9d4898b01db81895c drm/amd/display: Keep FAMS response waits on disable.
