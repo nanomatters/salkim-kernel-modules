@@ -1736,10 +1736,12 @@ static void amdgpu_vm_prt_fini(struct amdgpu_device *adev, struct amdgpu_vm *vm)
 }
 
 /**
- * amdgpu_vm_clear_freed - clear freed BOs in the PT
+ * amdgpu_vm_clear_freed_list - clear retired mappings in the PT
  *
  * @adev: amdgpu_device pointer
  * @vm: requested vm
+ * @freed: retired mappings to clear; unfinished records remain on this list
+ * @mode: reservation dependencies required for these retirements
  * @fence: optional fence for successful clear operations, including when
  *         a later clear fails
  *
@@ -1750,9 +1752,9 @@ static void amdgpu_vm_prt_fini(struct amdgpu_device *adev, struct amdgpu_vm *vm)
  * 0 for success.
  *
  */
-int amdgpu_vm_clear_freed(struct amdgpu_device *adev,
-			  struct amdgpu_vm *vm,
-			  struct dma_fence **fence)
+int amdgpu_vm_clear_freed_list(struct amdgpu_device *adev, struct amdgpu_vm *vm,
+			     struct list_head *freed, enum amdgpu_sync_mode mode,
+			     struct dma_fence **fence)
 {
 	struct amdgpu_bo_va_mapping *mapping, *tmp;
 	struct amdgpu_vm_update_batch batch;
@@ -1762,16 +1764,12 @@ int amdgpu_vm_clear_freed(struct amdgpu_device *adev,
 	bool batching = !vm->use_cpu_for_update;
 	int r, ret;
 
-	if (list_empty(&vm->freed))
+	if (list_empty(freed))
 		return 0;
 
-	/*
-	 * Implicitly sync to command submissions in the same VM before
-	 * unmapping.
-	 */
 	amdgpu_sync_create(&sync);
 	r = amdgpu_sync_resv(adev, &sync, vm->root.bo->tbo.base.resv,
-			     AMDGPU_SYNC_EQ_OWNER, vm);
+			     mode, vm);
 	if (r)
 		goto error_free;
 
@@ -1782,7 +1780,7 @@ int amdgpu_vm_clear_freed(struct amdgpu_device *adev,
 			goto error_free;
 	}
 
-	list_for_each_entry_safe(mapping, tmp, &vm->freed, list) {
+	list_for_each_entry_safe(mapping, tmp, freed, list) {
 		if (batching)
 			r = amdgpu_vm_update_pages(&batch.params, mapping->start,
 					   mapping->last, 0, 0, 0, NULL, NULL);
@@ -1803,7 +1801,7 @@ int amdgpu_vm_clear_freed(struct amdgpu_device *adev,
 	if (batching) {
 		ret = amdgpu_vm_update_end(&batch, &f);
 		if (ret) {
-			list_splice_init(&cleared, &vm->freed);
+			list_splice_init(&cleared, freed);
 		} else {
 			list_for_each_entry_safe(mapping, tmp, &cleared, list) {
 				list_del(&mapping->list);
@@ -1826,6 +1824,13 @@ error_free:
 	amdgpu_sync_free(&sync);
 	return r;
 
+}
+
+int amdgpu_vm_clear_freed(struct amdgpu_device *adev, struct amdgpu_vm *vm,
+			  struct dma_fence **fence)
+{
+	return amdgpu_vm_clear_freed_list(adev, vm, &vm->freed,
+					AMDGPU_SYNC_EQ_OWNER, fence);
 }
 
 /**
@@ -2245,6 +2250,7 @@ int amdgpu_vm_bo_unmap(struct amdgpu_device *adev,
  * @before: prepared record for the surviving prefix
  * @after: prepared record for the surviving suffix
  * @freed: destination for mappings requiring GPU retirement
+ * @explicit_sync: optional batch eligibility; cleared for unsupported backing
  *
  * Remove all mappings in a range, split them as appropriate.
  *
@@ -2254,7 +2260,7 @@ static void amdgpu_vm_bo_clear_mappings_prealloc(struct amdgpu_device *adev,
 				struct amdgpu_vm *vm, uint64_t saddr, uint64_t size,
 				struct amdgpu_bo_va_mapping *before,
 				struct amdgpu_bo_va_mapping *after,
-				struct list_head *freed)
+				struct list_head *freed, bool *explicit_sync)
 {
 	struct amdgpu_bo_va_mapping *tmp, *next;
 	LIST_HEAD(removed);
@@ -2306,6 +2312,15 @@ static void amdgpu_vm_bo_clear_mappings_prealloc(struct amdgpu_device *adev,
 		if (tmp->last > eaddr)
 		    tmp->last = eaddr;
 
+		if (explicit_sync && *explicit_sync) {
+			struct amdgpu_bo *bo = tmp->bo_va->base.bo;
+
+			if (bo ? (!amdgpu_vm_is_bo_always_valid(vm, bo) ||
+				  drm_gem_is_imported(&bo->tbo.base) ||
+				  amdgpu_ttm_tt_get_usermm(bo->tbo.ttm)) :
+				 !(tmp->flags & AMDGPU_VM_PAGE_PRT))
+				*explicit_sync = false;
+		}
 		tmp->bo_va = NULL;
 		list_add(&tmp->list, freed);
 		trace_amdgpu_vm_bo_unmap(NULL, tmp);
@@ -2359,7 +2374,7 @@ int amdgpu_vm_bo_clear_mappings(struct amdgpu_device *adev,
 		return -ENOMEM;
 	}
 	amdgpu_vm_bo_clear_mappings_prealloc(adev, vm, saddr, size, before, after,
-					   &vm->freed);
+					   &vm->freed, NULL);
 	return 0;
 }
 
@@ -2367,12 +2382,12 @@ int amdgpu_vm_bo_clear_mappings(struct amdgpu_device *adev,
 void amdgpu_vm_bo_replace_map_prealloc(struct amdgpu_device *adev,
 		struct amdgpu_bo_va *bo_va, uint64_t saddr, uint64_t offset,
 		uint64_t size, uint32_t flags, struct amdgpu_bo_va_mapping **maps,
-		struct list_head *freed)
+		struct list_head *freed, bool *explicit_sync)
 {
 	struct amdgpu_bo_va_mapping *mapping = maps[0];
 
 	amdgpu_vm_bo_clear_mappings_prealloc(adev, bo_va->base.vm, saddr, size,
-					   maps[1], maps[2], freed);
+					   maps[1], maps[2], freed, explicit_sync);
 	mapping->start = saddr / AMDGPU_GPU_PAGE_SIZE;
 	mapping->last = mapping->start + (size - 1) / AMDGPU_GPU_PAGE_SIZE;
 	mapping->offset = offset;
