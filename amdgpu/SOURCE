@@ -262,3 +262,5 @@ b284f8caa5ca2954340c8a7435001099237ae171 drm/amdgpu: Enable HDMI audio only for 
 413c1ff20d425092feec5ffd633ffc5a05c8d639 drm/amd/display: Set FreeSync eligibility before validation.
 
 135bceb80413e8ad8637c3f474e6b4fb312a847e drm/amd/pm: Provide SMU13.0.7 GPU UUIDs.
+
+95bc87325b9f58850137b7476d6c00f8474a9552 drm/amdgpu: Use the default DMA fence release.
