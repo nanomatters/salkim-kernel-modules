@@ -222,3 +222,5 @@ ee44c6c0e3035fc3f8974675df051f55ddd5e16b drm/amdgpu: Declare missing firmware fi
 29f8f2aa30732483dc7af5eb2041d93b64373654 drm/amdgpu: Populate cached harvest information.
 
 3fd534d47b2dd5386d1dffbe687b75cc1b7c4c5b drm/amdgpu: Publish IH state before enabling interrupts.
+
+c7fa3e50e328bef82843c91abb41be27c79b0a4e drm/amd/display: Preserve DDC pins owned by AUX.
