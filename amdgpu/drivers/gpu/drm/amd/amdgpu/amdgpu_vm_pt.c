@@ -479,6 +479,8 @@ int amdgpu_vm_pt_create(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	return amdgpu_bo_create_vm(adev, &bp, vmbo);
 }
 
+static void amdgpu_vm_pt_free(struct amdgpu_vm_bo_base *entry);
+
 /**
  * amdgpu_vm_pt_alloc - Allocate a specific page table
  *
@@ -526,7 +528,7 @@ static int amdgpu_vm_pt_alloc(struct amdgpu_device *adev,
 	return 0;
 
 error_free_pt:
-	amdgpu_bo_unref(&pt_bo);
+	amdgpu_vm_pt_free(entry);
 	return r;
 }
 
