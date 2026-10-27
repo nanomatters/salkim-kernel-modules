@@ -376,7 +376,7 @@ out_fence:
 
 out_unlock:
 	if (r && !drm_dev_is_unplugged(adev_to_drm(adev)))
-		dev_err(adev->dev, "leaking bo va (%ld)\n", r);
+		dev_err(adev->dev, "BO VA cleanup failed (%ld)\n", r);
 	drm_exec_fini(&exec);
 }
 
