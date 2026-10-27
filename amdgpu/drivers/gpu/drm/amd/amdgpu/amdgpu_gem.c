@@ -1055,7 +1055,6 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 	struct drm_exec exec;
 	DEFINE_XARRAY(bos);
 	u64 end, vm_size = adev->vm_manager.max_pfn * AMDGPU_GPU_PAGE_SIZE;
-	unsigned long index;
 	u32 i, j;
 	int r;
 
@@ -1140,7 +1139,7 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 			goto unlock;
 		}
 		entries[i].bo_va = bo_va;
-		r = xa_err(xa_store(&bos, ops[i].handle, bo_va, GFP_KERNEL));
+		r = xa_err(xa_store(&bos, (unsigned long)bo_va, bo_va, GFP_KERNEL));
 		if (r)
 			goto unlock;
 	}
@@ -1160,13 +1159,8 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 
 	/* Reuse existing batching, reservation dependencies and invalidation. */
 	r = amdgpu_vm_clear_freed(adev, vm, &vm->last_update);
-	if (!r) {
-		xa_for_each(&bos, index, bo_va) {
-			r = amdgpu_vm_bo_update(adev, bo_va, false);
-			if (r)
-				break;
-		}
-	}
+	if (!r)
+		r = amdgpu_vm_bo_update_batch(adev, vm, &bos);
 	if (!r)
 		r = amdgpu_vm_update_pdes(adev, vm, false);
 	/* Retry transient update failures at CS validation, as with GEM_VA. */

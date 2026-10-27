@@ -1321,22 +1321,13 @@ void amdgpu_vm_get_memory(struct amdgpu_vm *vm,
 	spin_unlock(&vm->stats_lock);
 }
 
-/**
- * amdgpu_vm_bo_update - update all BO mappings in the vm page table
- *
- * @adev: amdgpu_device pointer
- * @bo_va: requested BO and VM object
- * @clear: if true clear the entries
- *
- * Fill in the page table entries for @bo_va.
- *
- * Returns:
- * 0 for success, -EINVAL for failure.
- */
-int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
-			bool clear)
+static void amdgpu_vm_bo_update_done(struct amdgpu_bo_va *bo_va, bool clear);
+
+static int amdgpu_vm_bo_update_internal(struct amdgpu_device *adev,
+				       struct amdgpu_bo_va *bo_va, bool clear,
+				       struct amdgpu_vm_update_batch *shared)
 {
-	struct amdgpu_vm_update_batch batch;
+	struct amdgpu_vm_update_batch local_batch, *batch = shared ?: &local_batch;
 	struct amdgpu_bo *bo = bo_va->base.bo;
 	struct amdgpu_vm *vm = bo_va->base.vm;
 	struct amdgpu_bo_va_mapping *mapping;
@@ -1389,10 +1380,12 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 			pages_addr = bo->tbo.ttm->dma_address;
 
 		/* Implicitly sync to moving fences before mapping anything */
-		r = amdgpu_sync_resv(adev, &sync, bo->tbo.base.resv,
-				     AMDGPU_SYNC_EXPLICIT, vm);
-		if (r)
-			goto error_free;
+		if (!shared) {
+			r = amdgpu_sync_resv(adev, &sync, bo->tbo.base.resv,
+					     AMDGPU_SYNC_EXPLICIT, vm);
+			if (r)
+				goto error_free;
+		}
 	}
 
 	if (bo) {
@@ -1425,9 +1418,12 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 		list_splice_init(&bo_va->valids, &bo_va->invalids);
 	}
 
-	batching = !vm->use_cpu_for_update && !list_empty(&bo_va->invalids);
-	if (batching) {
-		r = amdgpu_vm_update_begin(&batch, adev, vm, false, false,
+	batching = shared || (!vm->use_cpu_for_update && !list_empty(&bo_va->invalids));
+	if (shared) {
+		batch->params.needs_flush |= flush_tlb;
+		batch->params.override_pte = !uncached && adev->gmc.override_pte;
+	} else if (batching) {
+		r = amdgpu_vm_update_begin(batch, adev, vm, false, false,
 					   flush_tlb, !uncached, &sync);
 		if (r)
 			goto error_free;
@@ -1451,7 +1447,7 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 		trace_amdgpu_vm_bo_update(mapping);
 
 		if (batching)
-			r = amdgpu_vm_update_pages(&batch.params, mapping->start,
+			r = amdgpu_vm_update_pages(&batch->params, mapping->start,
 					   mapping->last, update_flags,
 					   mapping->offset, vram_base, mem,
 					   pages_addr);
@@ -1465,13 +1461,24 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 			break;
 	}
 
-	if (batching) {
-		ret = amdgpu_vm_update_end(&batch, last_update);
+	if (batching && !shared) {
+		ret = amdgpu_vm_update_end(batch, last_update);
 		if (!r)
 			r = ret;
 	}
-	if (r)
-		goto error_free;
+	if (!r && !shared)
+		amdgpu_vm_bo_update_done(bo_va, clear);
+
+error_free:
+	amdgpu_sync_free(&sync);
+	return r;
+}
+
+static void amdgpu_vm_bo_update_done(struct amdgpu_bo_va *bo_va, bool clear)
+{
+	struct amdgpu_bo *bo = bo_va->base.bo;
+	struct amdgpu_vm *vm = bo_va->base.vm;
+	struct amdgpu_bo_va_mapping *mapping;
 
 	/* If the BO is not in its preferred location add it back to
 	 * the evicted list so that it gets validated again on the
@@ -1502,10 +1509,85 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
 		list_for_each_entry(mapping, &bo_va->valids, list)
 			trace_amdgpu_vm_bo_mapping(mapping);
 	}
+}
 
-error_free:
+/**
+ * amdgpu_vm_bo_update - update all BO mappings in the vm page table
+ *
+ * @adev: amdgpu_device pointer
+ * @bo_va: requested BO and VM object
+ * @clear: if true clear the entries
+ *
+ * Fill in the page table entries for @bo_va.
+ *
+ * Returns:
+ * 0 for success, -EINVAL for failure.
+ */
+int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
+			bool clear)
+{
+	return amdgpu_vm_bo_update_internal(adev, bo_va, clear, NULL);
+}
+
+static bool amdgpu_vm_bo_can_batch(struct amdgpu_vm *vm,
+				   struct amdgpu_bo_va *bo_va)
+{
+	struct amdgpu_bo *bo = bo_va->base.bo;
+
+	return !vm->use_cpu_for_update && amdgpu_vm_is_bo_always_valid(vm, bo) &&
+		!drm_gem_is_imported(&bo->tbo.base) &&
+		(bo_va->base.moved || bo_va->cleared || !list_empty(&bo_va->invalids));
+}
+
+/* Share a submission only for native BOs with the root reservation. */
+int amdgpu_vm_bo_update_batch(struct amdgpu_device *adev, struct amdgpu_vm *vm,
+			      struct xarray *bos)
+{
+	struct amdgpu_vm_update_batch batch;
+	struct amdgpu_bo_va *bo_va;
+	struct amdgpu_sync sync;
+	unsigned long index;
+	bool pending = false;
+	int r, ret;
+
+	xa_for_each(bos, index, bo_va) {
+		if (amdgpu_vm_bo_can_batch(vm, bo_va)) {
+			pending = true;
+			continue;
+		}
+		r = amdgpu_vm_bo_update(adev, bo_va, false);
+		if (r)
+			return r;
+	}
+	if (!pending)
+		return 0;
+
+	amdgpu_sync_create(&sync);
+	r = amdgpu_sync_resv(adev, &sync, vm->root.bo->tbo.base.resv,
+			     AMDGPU_SYNC_EXPLICIT, vm);
+	if (!r)
+		r = amdgpu_vm_update_begin(&batch, adev, vm, false, false,
+					   false, false, &sync);
 	amdgpu_sync_free(&sync);
-	return r;
+	if (r)
+		return r;
+
+	xa_for_each(bos, index, bo_va) {
+		if (!amdgpu_vm_bo_can_batch(vm, bo_va))
+			continue;
+		r = amdgpu_vm_bo_update_internal(adev, bo_va, false, &batch);
+		if (r)
+			break;
+	}
+	ret = amdgpu_vm_update_end(&batch, &vm->last_update);
+	if (r || ret)
+		return r ?: ret;
+
+	/* Keep every mapping retryable until the shared commit succeeds. */
+	xa_for_each(bos, index, bo_va)
+		if (amdgpu_vm_bo_can_batch(vm, bo_va))
+			amdgpu_vm_bo_update_done(bo_va, false);
+	return 0;
 }
 
 /**
