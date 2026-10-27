@@ -1069,7 +1069,7 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 
 	if (args->cookie != AMDGPU_GEM_VA_BATCH_COOKIE ||
 	    (args->flags & ~AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE) ||
-	    args->reserved[0] || args->reserved[1] || args->status || args->applied ||
+	    args->reserved[0] || args->reserved[1] ||
 	    !args->count || args->count > AMDGPU_GEM_VA_BATCH_MAX_OPS)
 		return -EINVAL;
 	if (!amdgpu_gem_va_batch_supported(adev, vm))
@@ -1165,7 +1165,6 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 			ops[i].va_address, ops[i].offset_in_bo, ops[i].map_size,
 			ops[i].flags, entries[i].maps, &freed,
 			explicit_sync ? &explicit_sync : NULL);
-	args->applied = args->count;
 	if (!explicit_sync)
 		list_splice_init(&freed, &vm->freed);
 
@@ -1184,11 +1183,10 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 		r = amdgpu_vm_bo_update_batch(adev, vm, &bos);
 	if (!r)
 		r = amdgpu_vm_update_pdes(adev, vm, false);
-	/* Retry transient update failures at CS validation, as with GEM_VA. */
-	if (r == -ENOMEM || r == -EINTR || r == -ERESTARTSYS)
-		r = 0;
-	args->status = r;
-	/* Never let the syscall layer restart a partially applied batch. */
+	/* Acceptance is final. CS retries unfinished clears, mappings and PDEs. */
+	if (r)
+		dev_dbg_ratelimited(adev->dev,
+				    "Deferred batch page-table update after error %d\n", r);
 	r = 0;
 unlock:
 	/* Deferred or failed retirements resume on the conservative path. */

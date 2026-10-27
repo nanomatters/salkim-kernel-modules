@@ -83,7 +83,7 @@ extern "C" {
 #define DRM_IOCTL_AMDGPU_GEM_LIST_HANDLES DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_LIST_HANDLES, struct drm_amdgpu_gem_list_handles)
 #define DRM_IOCTL_AMDGPU_PROC_OPTIONS	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_PROC_OPTIONS, struct drm_amdgpu_proc_options)
 #define DRM_IOCTL_AMDGPU_GEM_VA_BATCH \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_VA_BATCH, struct drm_amdgpu_gem_va_batch)
+	DRM_IOW(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_VA_BATCH, struct drm_amdgpu_gem_va_batch)
 
 /* Local, versioned ABI: probe INFO first; never infer support from DRM minor. */
 #define AMDGPU_INFO_GEM_VA_BATCH		0x25
@@ -105,7 +105,7 @@ struct drm_amdgpu_info_gem_va_batch {
 };
 
 /* REPLACE operations, in array order. PRT with handle 0 unbinds a range.
- * DELAY_UPDATE is not accepted: the batch applies all its pending mappings.
+ * DELAY_UPDATE is not accepted; the kernel manages pending updates.
  */
 struct drm_amdgpu_gem_va_batch_op {
 	__u32 handle;
@@ -115,19 +115,22 @@ struct drm_amdgpu_gem_va_batch_op {
 	__u64 map_size;
 };
 
-/* This is vector transport, not async VM_BIND. With flags == 0, legacy VM
- * dependencies are preserved. Optional flags must be advertised in features.
- * All fields except cookie, operations, count and flags must initially be zero.
- * Negative ioctl return before mutation leaves mappings unchanged. A copyout
- * fault is ambiguous: userspace must not retry it or replay through GEM_VA.
+/* Batched GEM_VA acceptance for kernel-queue VMs, not async VM_BIND.
+ * Probe INFO and match the cookie before use. Optional flags must be advertised
+ * in features. Reserved fields must be zero. KFD, user-queue and CPU-updated VMs
+ * must use the legacy GEM_VA path.
  *
- * Once mappings change, ioctl returns 0 with applied == count. There is
- * no rollback or safe replay. status == 0 means PTE/PDE updates were
- * submitted or left pending for CS validation, as with GEM_VA. Allocation
- * failures and interrupted update waits also leave updates pending and
- * return status == 0. Other update failures return a negative status.
- * Acceptance is not GPU completion.
- * Normal CS dependencies and TLB-invalidation rules remain in effect.
+ * A negative ioctl return leaves every mapping unchanged. A zero return accepts
+ * the entire array, in order. The request is input-only, so no copy-out can fail
+ * after acceptance. There is no partial count, secondary status or safe replay
+ * of a successful request.
+ *
+ * Acceptance does not mean GPU completion. As with GEM_VA, page-table updates
+ * may remain pending when the VM is evicted or an update fails. The kernel keeps
+ * that work for command-submission validation, which must complete preparation
+ * successfully before submitting commands. Existing update-fence dependencies
+ * and TLB-invalidation rules remain in effect. Persistent update failures are
+ * reported by command submission, not by replaying the accepted batch.
  * No userspace semaphore is signaled by this ioctl.
  */
 struct drm_amdgpu_gem_va_batch {
@@ -135,8 +138,6 @@ struct drm_amdgpu_gem_va_batch {
 	__u64 operations;
 	__u32 count;
 	__u32 flags;
-	__u32 applied;
-	__s32 status;
 	__u64 reserved[2];
 };
 
