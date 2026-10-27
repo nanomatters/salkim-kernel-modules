@@ -1032,6 +1032,15 @@ error_put_gobj:
 	return r;
 }
 
+/* Deferred updates rely on the kernel command-submission validation path. */
+bool amdgpu_gem_va_batch_supported(struct amdgpu_device *adev,
+				   struct amdgpu_vm *vm)
+{
+	return !adev->debug_vm && !vm->use_cpu_for_update &&
+		!vm->is_compute_context && !vm->need_tlb_fence &&
+		!amdgpu_userq_enabled(adev_to_drm(adev));
+}
+
 struct amdgpu_va_batch_entry {
 	struct drm_gem_object *obj;
 	struct amdgpu_bo_va *bo_va;
@@ -1063,7 +1072,7 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 	    args->reserved[0] || args->reserved[1] || args->status || args->applied ||
 	    !args->count || args->count > AMDGPU_GEM_VA_BATCH_MAX_OPS)
 		return -EINVAL;
-	if (adev->debug_vm || vm->use_cpu_for_update)
+	if (!amdgpu_gem_va_batch_supported(adev, vm))
 		return -EOPNOTSUPP;
 	ops = vmemdup_user(u64_to_user_ptr(args->operations),
 			  array_size(args->count, sizeof(*ops)));
@@ -1132,8 +1141,7 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 			goto unlock;
 	}
 	/* KFD can change the VM mode after the capability probe. */
-	if (explicit_sync && (vm->use_cpu_for_update || vm->is_compute_context ||
-			      vm->need_tlb_fence || amdgpu_userq_enabled(dev))) {
+	if (!amdgpu_gem_va_batch_supported(adev, vm)) {
 		r = -EOPNOTSUPP;
 		goto unlock;
 	}
