@@ -59,7 +59,7 @@ extern "C" {
 #define DRM_AMDGPU_USERQ_WAIT		0x18
 #define DRM_AMDGPU_GEM_LIST_HANDLES	0x19
 #define DRM_AMDGPU_PROC_OPTIONS		0x1A
-#define DRM_AMDGPU_GEM_VA_BATCH		0x1B
+#define DRM_AMDGPU_GEM_VA_BATCH		0x1C
 
 #define DRM_IOCTL_AMDGPU_GEM_CREATE	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_CREATE, union drm_amdgpu_gem_create)
 #define DRM_IOCTL_AMDGPU_GEM_MMAP	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_MMAP, union drm_amdgpu_gem_mmap)
@@ -86,8 +86,8 @@ extern "C" {
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_AMDGPU_GEM_VA_BATCH, struct drm_amdgpu_gem_va_batch)
 
 /* Local, versioned ABI: probe INFO first; never infer support from DRM minor. */
-#define AMDGPU_INFO_GEM_VA_BATCH		0x53414c42
-#define AMDGPU_GEM_VA_BATCH_COOKIE	0x53414c4b56414201ULL
+#define AMDGPU_INFO_GEM_VA_BATCH		0x25
+#define AMDGPU_GEM_VA_BATCH_COOKIE	0x53414c4b56414203ULL
 #define AMDGPU_GEM_VA_BATCH_MAX_OPS	4096
 
 /* The caller has completed the dependencies of the replaced ranges.
