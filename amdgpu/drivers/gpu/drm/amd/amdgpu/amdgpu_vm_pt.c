@@ -369,7 +369,7 @@ int amdgpu_vm_pt_clear(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	struct amdgpu_bo *bo = &vmbo->bo;
 	uint64_t value = 0, flags = 0;
 	uint64_t addr;
-	int r, idx;
+	int r, ret, idx;
 
 	/* Figure out our place in the hierarchy */
 	if (ancestor->parent) {
@@ -419,10 +419,10 @@ int amdgpu_vm_pt_clear(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 
 	r = vm->update_funcs->update(&params, vmbo, addr, 0, entries,
 				     value, flags);
-	if (r)
-		goto exit;
 
-	r = vm->update_funcs->commit(&params, &vm->last_update);
+	ret = vm->update_funcs->commit(&params, &vm->last_update);
+	if (!r)
+		r = ret;
 exit:
 	drm_dev_exit(idx);
 	return r;
@@ -672,7 +672,7 @@ static void amdgpu_vm_pte_update_noretry_flags(struct amdgpu_device *adev,
  *
  * Make sure to set the right flags for the PTEs at the desired level.
  */
-static void amdgpu_vm_pte_update_flags(struct amdgpu_vm_update_params *params,
+static int amdgpu_vm_pte_update_flags(struct amdgpu_vm_update_params *params,
 				       struct amdgpu_bo_vm *pt,
 				       unsigned int level,
 				       uint64_t pe, uint64_t addr,
@@ -706,7 +706,7 @@ static void amdgpu_vm_pte_update_flags(struct amdgpu_vm_update_params *params,
 	if (level == AMDGPU_VM_PTB)
 		amdgpu_vm_pte_update_noretry_flags(adev, &flags);
 
-	params->vm->update_funcs->update(params, pt, pe, addr, count, incr,
+	return params->vm->update_funcs->update(params, pt, pe, addr, count, incr,
 					 flags);
 }
 
@@ -896,9 +896,11 @@ int amdgpu_vm_ptes_update(struct amdgpu_vm_update_params *params,
 						    upd_flags,
 						    vm->task_info ? vm->task_info->tgid : 0,
 						    vm->immediate.fence_context);
-			amdgpu_vm_pte_update_flags(params, to_amdgpu_bo_vm(pt),
+			r = amdgpu_vm_pte_update_flags(params, to_amdgpu_bo_vm(pt),
 						   cursor.level, pe_start, dst,
 						   nptes, incr, upd_flags);
+			if (r)
+				return r;
 
 			pe_start += nptes * 8;
 			dst += nptes * incr;
