@@ -38,9 +38,10 @@ static int amdgpu_vm_sdma_map_table(struct amdgpu_bo_vm *table)
 	return amdgpu_ttm_alloc_gart(&table->bo.tbo);
 }
 
-/* Allocate a new job for @count PTE updates */
+/* Allocate a job for @count PTE updates, growing to @min_dw when possible. */
 static int amdgpu_vm_sdma_alloc_job(struct amdgpu_vm_update_params *p,
-				    unsigned int count, u64 k_job_id)
+				    unsigned int count, unsigned int min_dw,
+				    u64 k_job_id)
 {
 	enum amdgpu_ib_pool_type pool = p->immediate ? AMDGPU_IB_POOL_IMMEDIATE
 		: AMDGPU_IB_POOL_DELAYED;
@@ -53,6 +54,8 @@ static int amdgpu_vm_sdma_alloc_job(struct amdgpu_vm_update_params *p,
 	ndw = AMDGPU_VM_SDMA_MIN_NUM_DW;
 	if (p->pages_addr)
 		ndw += count * 2;
+	if (!p->immediate)
+		ndw = max(ndw, min_dw);
 	ndw = min(ndw, AMDGPU_VM_SDMA_MAX_NUM_DW);
 
 	r = amdgpu_job_alloc_with_ib(p->adev, entity, AMDGPU_FENCE_OWNER_VM,
@@ -79,7 +82,7 @@ static int amdgpu_vm_sdma_prepare(struct amdgpu_vm_update_params *p,
 {
 	int r;
 
-	r = amdgpu_vm_sdma_alloc_job(p, 0, k_job_id);
+	r = amdgpu_vm_sdma_alloc_job(p, 0, 0, k_job_id);
 	if (r)
 		return r;
 
@@ -267,9 +270,11 @@ static int amdgpu_vm_sdma_update(struct amdgpu_vm_update_params *p,
 		ndw -= p->job->ibs->length_dw;
 
 		if (ndw < 32) {
+			unsigned int size_dw = drm_suballoc_size(p->job->ibs->sa_bo) / 4;
+
 			/* Submit before allocating another buffer from the shared pool. */
 			amdgpu_vm_sdma_submit(p);
-			r = amdgpu_vm_sdma_alloc_job(p, count,
+			r = amdgpu_vm_sdma_alloc_job(p, count, size_dw * 2,
 						     AMDGPU_KERNEL_JOB_ID_VM_UPDATE);
 			if (r)
 				return r;
