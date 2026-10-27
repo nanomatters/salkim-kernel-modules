@@ -90,30 +90,32 @@ static int amdgpu_vm_sdma_prepare(struct amdgpu_vm_update_params *p,
 	if (r) {
 		p->num_dw_left = 0;
 		amdgpu_job_free(p->job);
+		p->job = NULL;
 	}
 	return r;
 }
 
 /**
- * amdgpu_vm_sdma_commit - commit SDMA command submission
+ * amdgpu_vm_sdma_submit - submit the current SDMA job
  *
  * @p: see amdgpu_vm_update_params definition
- * @fence: resulting fence
- *
- * Returns:
- * Negativ errno, 0 for success.
  */
-static int amdgpu_vm_sdma_commit(struct amdgpu_vm_update_params *p,
-				 struct dma_fence **fence)
+static void amdgpu_vm_sdma_submit(struct amdgpu_vm_update_params *p)
 {
-	struct amdgpu_ib *ib = p->job->ibs;
-	struct amdgpu_ring *ring;
+	struct amdgpu_ring *ring =
+		container_of(p->vm->delayed.rq->sched, struct amdgpu_ring, sched);
+	struct amdgpu_ib *ib;
 	struct dma_fence *f;
 
-	ring = container_of(p->vm->delayed.rq->sched, struct amdgpu_ring,
-			    sched);
+	if (!p->job)
+		return;
 
-	WARN_ON(ib->length_dw == 0);
+	ib = p->job->ibs;
+	if (!ib->length_dw) {
+		amdgpu_job_free(p->job);
+		p->job = NULL;
+		return;
+	}
 	amdgpu_ring_pad_ib(ring, ib);
 
 	if (p->needs_flush)
@@ -121,6 +123,7 @@ static int amdgpu_vm_sdma_commit(struct amdgpu_vm_update_params *p,
 
 	WARN_ON(ib->length_dw > p->num_dw_left);
 	f = amdgpu_job_submit(p->job);
+	p->job = NULL;
 
 	if (p->unlocked) {
 		struct dma_fence *tmp = dma_fence_get(f);
@@ -132,16 +135,35 @@ static int amdgpu_vm_sdma_commit(struct amdgpu_vm_update_params *p,
 				   DMA_RESV_USAGE_BOOKKEEP);
 	}
 
-	if (fence && !p->immediate) {
+	dma_fence_put(p->last_fence);
+	p->last_fence = f;
+}
+
+/**
+ * amdgpu_vm_sdma_commit - complete SDMA command submission
+ *
+ * @p: see amdgpu_vm_update_params definition
+ * @fence: resulting fence, including work submitted before an update failed
+ *
+ * Returns:
+ * 0 for success.
+ */
+static int amdgpu_vm_sdma_commit(struct amdgpu_vm_update_params *p,
+				 struct dma_fence **fence)
+{
+	amdgpu_vm_sdma_submit(p);
+
+	if (fence && !p->immediate && p->last_fence) {
 		/*
 		 * Most hw generations now have a separate queue for page table
 		 * updates, but when the queue is shared with userspace we need
 		 * the extra CPU round trip to correctly flush the TLB.
 		 */
-		set_bit(DRM_SCHED_FENCE_DONT_PIPELINE, &f->flags);
-		swap(*fence, f);
+		set_bit(DRM_SCHED_FENCE_DONT_PIPELINE, &p->last_fence->flags);
+		swap(*fence, p->last_fence);
 	}
-	dma_fence_put(f);
+	dma_fence_put(p->last_fence);
+	p->last_fence = NULL;
 	return 0;
 }
 
@@ -245,10 +267,8 @@ static int amdgpu_vm_sdma_update(struct amdgpu_vm_update_params *p,
 		ndw -= p->job->ibs->length_dw;
 
 		if (ndw < 32) {
-			r = amdgpu_vm_sdma_commit(p, NULL);
-			if (r)
-				return r;
-
+			/* Submit before allocating another buffer from the shared pool. */
+			amdgpu_vm_sdma_submit(p);
 			r = amdgpu_vm_sdma_alloc_job(p, count,
 						     AMDGPU_KERNEL_JOB_ID_VM_UPDATE);
 			if (r)
