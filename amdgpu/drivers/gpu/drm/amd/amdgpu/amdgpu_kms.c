@@ -680,11 +680,9 @@ int amdgpu_info_ioctl(struct drm_device *dev, void *data, struct drm_file *filp)
 		};
 
 		fpriv = filp->driver_priv;
-		if (adev->debug_vm || fpriv->vm.use_cpu_for_update)
+		if (!amdgpu_gem_va_batch_supported(adev, &fpriv->vm))
 			return -EOPNOTSUPP;
-		if (!amdgpu_userq_enabled(dev) && !fpriv->vm.is_compute_context &&
-		    !fpriv->vm.need_tlb_fence)
-			caps.features = AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE;
+		caps.features = AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE;
 		return copy_to_user(out, &caps, min_t(u32, size, sizeof(caps))) ?
 			-EFAULT : 0;
 	}
