@@ -220,3 +220,5 @@ e61b299b866e4ff06145a87da304af9a169231f9 drm/amdgpu: Use RSMU registers for NBIO
 ee44c6c0e3035fc3f8974675df051f55ddd5e16b drm/amdgpu: Declare missing firmware files.
 
 29f8f2aa30732483dc7af5eb2041d93b64373654 drm/amdgpu: Populate cached harvest information.
+
+3fd534d47b2dd5386d1dffbe687b75cc1b7c4c5b drm/amdgpu: Publish IH state before enabling interrupts.
