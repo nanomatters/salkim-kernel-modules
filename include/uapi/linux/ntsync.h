@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+/* Modified for Salkim IOCP support, 2026-10-29. */
 /*
  * Kernel support for NT synchronization primitive emulation
  *

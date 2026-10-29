@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /*
  * Copyright 2014-2018 Advanced Micro Devices, Inc.
  *

@@ -1,0 +1,18 @@
+Salkim kernel modules
+
+Project-authored build files, packaging and tests are licensed under
+GPL-2.0-only unless a file states otherwise.
+
+Imported Linux source retains its original per-file license and copyright
+notices. This includes GPL-2.0-only, GPL-2.0-or-later and MIT source, and
+the Linux syscall exception where explicitly stated in UAPI headers.
+No upstream file is relicensed by this project.
+
+Full license texts:
+
+  amdgpu/LICENSES/preferred/GPL-2.0
+  amdgpu/LICENSES/preferred/MIT
+  amdgpu/LICENSES/exceptions/Linux-syscall-note
+
+AMDGPU source provenance and imported fixes are recorded in amdgpu/SOURCE.
+Dated change notices identify the modified source files.

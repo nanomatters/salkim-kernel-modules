@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 CC ?= cc
 CPPFLAGS += -I../include/uapi
 CFLAGS ?= -O2 -g

@@ -1,3 +1,4 @@
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /*
  * Copyright 2009 Jerome Glisse.
  * All Rights Reserved.
