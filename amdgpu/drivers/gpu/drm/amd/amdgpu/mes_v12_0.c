@@ -1207,9 +1207,14 @@ static int mes_v12_0_inv_tlbs_pasid(struct amdgpu_mes *mes,
 	if (ret < 0)
 		return -EINVAL;
 	mes_inv_tlbs.invalidate_tlbs.hub_id = ret;
-	return mes_v12_0_submit_pkt_and_poll_completion(mes, AMDGPU_MES_KIQ_PIPE,
+	ret = mes_v12_0_submit_pkt_and_poll_completion(mes, AMDGPU_MES_KIQ_PIPE,
 			&mes_inv_tlbs, sizeof(mes_inv_tlbs),
 			offsetof(union MESAPI__INV_TLBS, api_status));
+	if (ret)
+		dev_err(mes->adev->dev,
+			"MES TLB invalidation failed for PASID %u hub %u flush type %u: %d\n",
+			input->pasid, input->hub_id, input->flush_type, ret);
+	return ret;
 
 }
 
