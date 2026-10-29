@@ -6,8 +6,10 @@ https://github.com/nanomatters/kernel-salkim
 Branch: salkim-7.3
 Revision: 0b07b37e42fbfc27047d4ed7e64405d69dfd3005
 
-DRM core, scheduler, TTM and DMA-BUF changes are not imported. Display
-code remains at v7.3 apart from the AMDGPU scanout-position correction.
+DRM core, scheduler, TTM and DMA-BUF changes are not imported. Display ports
+are limited to changes that work with the upstream v7.3 DRM interfaces.
+The HDMI VRR/ALLM, common EDID parser and passive VRR groups are excluded
+because they depend on DRM core changes.
 The private AMDGPU UAPI header includes the matching sparse-batch interface.
 Local build changes add external-module Kbuild support and adjust the
 AMDGPU trace-header include path. Existing copyright notices are preserved.
@@ -48,3 +50,23 @@ e602da258235 Avoid duplicate GEM close error messages.
 be4473ddedee Restrict sparse batches to supported VMs.
 41f9014e43ad Update sparse batch ABI identifiers.
 0b07b37e42fb Make sparse batch acceptance input-only.
+
+Additional driver-contained ports:
+2e2fb6d12dfc Program OPP formatters for plane-less ODM segments.
+579dd1e60cf2 Enable the shaper when programming a 3D LUT.
+3e424772b9a7 Avoid reprogramming unchanged DRR timings.
+0d4dc20ce523 Invalidate cached DRR timings after hardware reinitialization.
+78335bd5031e Preserve customized OverDrive features on table uploads.
+3dcfaa434f81 Reject invalid per-mode FreeSync timing.
+48c64ac6f91e Match the VRR timing gate to the FreeSync module.
+8dd533d2811e Add HDMI RR and SCDC skips.
+2799db33c1e6 Update FRL link-training timeout behaviour.
+9b9e5994158d Correct HDMI 2.2 link-training timeout duration.
+f7a2e0bf3703 Update HDMI link-training no-timeout behaviour.
+fe6ff43874eb Fix the HDMI FRL FFE compliance test.
+427f17fbd9fe Adjust the HDMI FRL link-training timeout.
+d2bd6a336ca0 Fix HDMI FRL audio enablement.
+6da6a69721c1 Serialize HDMI FRL polling against link detection.
+2746e1165a14 Skip HDMI FRL polling while the link is down.
+5dec491a8d86 Recognize the Chrontel CH7218 converter.
+ccc580d56858 Enable HDMI FRL by default.

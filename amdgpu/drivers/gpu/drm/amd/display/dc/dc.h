@@ -1,3 +1,4 @@
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /*
  * Copyright 2012-2026 Advanced Micro Devices, Inc.
  *

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /*
  * KUnit tests for amdgpu_dm_freesync.c
  *

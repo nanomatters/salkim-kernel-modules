@@ -4,7 +4,12 @@ One DKMS package provides ntsync with IOCP support and a modified AMDGPU driver
 for Linux 7.3.x.
 
 The AMDGPU source starts from upstream Linux 7.3 and carries the driver contained
-Salkim VM fixes and sparse mapping optimisations.
+Salkim VM fixes, sparse mapping optimisations and independent display fixes,
+including HDMI FRL enablement, link training and audio fixes.
+
+HDMI VRR/ALLM and passive VRR changes that require modified DRM core are not
+included. This module does not preserve every display feature of the full
+Salkim kernel driver.
 
 AMDGPU is experimental and currently restricted to 7.3.x kernels with
 `CONFIG_DRM_AMDGPU=m`. Keep an unmodified kernel as a boot fallback.
