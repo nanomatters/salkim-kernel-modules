@@ -1,0 +1,45 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+_salkim_preset_has_amdgpu() (
+  local preset_file=$1
+  local PRESETS=() ALL_image= ALL_uki=
+  local preset_name image_var uki_var image
+
+  source "$preset_file" || return 1
+  for preset_name in "${PRESETS[@]}"; do
+    image_var="${preset_name}_image"
+    uki_var="${preset_name}_uki"
+    for image in "${!image_var:-$ALL_image}" "${!uki_var:-$ALL_uki}"; do
+      [[ -n $image && -r $image ]] || continue
+      if lsinitcpio --nocolor "$image" 2>/dev/null | \
+          grep -E '(^|/)lib/modules/7[.]3[.][^/]+/.*/amdgpu[.]ko([.](gz|xz|zst))?$' >/dev/null; then
+        return 0
+      fi
+    done
+  done
+  return 1
+)
+
+_salkim_rebuild_initramfs() {
+  command -v mkinitcpio >/dev/null || return 0
+  command -v lsinitcpio >/dev/null || return 0
+
+  local preset_dir=${1:-/etc/mkinitcpio.d}
+  local preset_file status=0
+  for preset_file in "$preset_dir"/*.preset; do
+    [[ -f $preset_file ]] || continue
+    if _salkim_preset_has_amdgpu "$preset_file"; then
+      mkinitcpio -p "$preset_file" || status=1
+    fi
+  done
+  return "$status"
+}
+
+post_remove() {
+  _salkim_rebuild_initramfs
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  _salkim_rebuild_initramfs
+fi

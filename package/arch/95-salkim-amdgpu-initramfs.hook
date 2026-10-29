@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/src/amdgpu-salkim-*/dkms.conf
+
+[Action]
+Description = Refreshing existing AMDGPU initramfs images...
+When = PostTransaction
+Exec = /usr/share/libalpm/scripts/salkim-amdgpu-initramfs
