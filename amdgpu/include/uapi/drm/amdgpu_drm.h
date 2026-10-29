@@ -1,3 +1,4 @@
+/* Modified for Salkim, 2026-10-29. See amdgpu/SOURCE for provenance. */
 /* amdgpu_drm.h -- Public header for the amdgpu driver -*- linux-c -*-
  *
  * Copyright 2000 Precision Insight, Inc., Cedar Park, Texas.

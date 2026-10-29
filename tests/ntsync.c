@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* Modified for Salkim IOCP support, 2026-10-29. */
 /*
  * Various unit tests for the "ntsync" synchronization primitive driver.
  *

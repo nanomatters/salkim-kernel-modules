@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/* Modified for Salkim IOCP support, 2026-10-29. */
 /*
  * ntsync.c - Kernel driver for NT synchronization primitives
  *
