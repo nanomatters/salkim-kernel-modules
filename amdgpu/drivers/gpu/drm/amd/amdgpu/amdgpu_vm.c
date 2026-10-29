@@ -490,6 +490,11 @@ int amdgpu_vm_lock_individual(struct amdgpu_vm *vm, struct drm_exec *exec,
 				return ret;
 
 			spin_lock(&vm->individual_lock);
+			/* The selected BO may have left idle while we waited.
+			 * Keep the cursor so the following BO is not skipped.
+			 */
+			if (prev->next != &bo_va->base.vm_status)
+				continue;
 		}
 		prev = prev->next;
 	}
