@@ -14,6 +14,24 @@ AMD = ROOT / 'amdgpu/drivers/gpu/drm/amd/amdgpu'
 
 
 class UserqTests(unittest.TestCase):
+    def test_wptr_fence_reservation(self):
+        source = (AMD / 'mes_userqueue.c').read_text()
+        body = re.search(r'^mes_userq_create_wptr_mapping\(.*?^\}', source, re.M | re.S).group()
+        prepare = re.search(r'drm_exec_prepare_obj\(&exec,\s*&obj->tbo.base,\s*'
+                            r'TTM_NUM_MOVE_FENCES \+ 1\)', body)
+        self.assertIsNotNone(prepare)
+        self.assertLess(prepare.start(), body.index('amdgpu_evf_mgr_attach_fence('))
+
+    def test_restore_fence_reservation(self):
+        source = (AMD / 'amdgpu_userq.c').read_text()
+        body = re.search(r'^amdgpu_userq_vm_validate_and_restore_queue\(.*?^\}',
+                         source, re.M | re.S).group()
+        prepare = re.search(r'amdgpu_vm_lock_pd\(vm,\s*&exec,\s*'
+                            r'TTM_NUM_MOVE_FENCES \+ 1\)', body)
+        self.assertIsNotNone(prepare)
+        self.assertLess(prepare.start(), body.index('amdgpu_vm_validate('))
+        self.assertLess(prepare.start(), body.index('amdgpu_evf_mgr_rearm('))
+
     def test_interface_version(self):
         source = (AMD / 'amdgpu_drv.c').read_text()
         values = [int(re.search(r'^#define KMS_DRIVER_' + name + r'\s+(\d+)$',
