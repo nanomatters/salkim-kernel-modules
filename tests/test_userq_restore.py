@@ -276,6 +276,16 @@ int main(void)
     assert(amdgpu_userq_vm_validate_and_restore_queue(&fpriv.userq_mgr) == 0);
     assert(restored == 1 && !updates && !target_va.cleared);
 
+    for (unsigned evicted = 0; evicted < 2; evicted++) {
+        setup();
+        list_move(&target_va.base.vm_status, evicted ? &fpriv.vm.individual.evicted :
+                                                    &fpriv.vm.individual.needs_update);
+        target_resource.mem_type = TTM_PL_SYSTEM;
+        assert(amdgpu_userq_vm_validate_and_restore_queue(&fpriv.userq_mgr) == 0);
+        assert(restored == 1 && updates == 1 && target_va.mapped && !target_va.cleared);
+        assert(target_resource.mem_type != TTM_PL_SYSTEM && target_bo.refs == 1);
+    }
+
     for (unsigned state = 0; state < 6; state++) {
         setup();
         list_move(&target_va.base.vm_status, &fpriv.vm.individual.needs_update);
@@ -306,7 +316,12 @@ int main(void)
     assert(amdgpu_userq_vm_validate_and_restore_queue(&fpriv.userq_mgr) == -ENOMEM);
     assert(!restored && !target_resv.owner);
 
-    puts("UserQ restore: 10 reservation, residency and failure cases passed");
+    setup();
+    list_move(&target_va.base.vm_status, &fpriv.vm.individual.needs_update);
+    validation_error = -ENOMEM;
+    assert(amdgpu_userq_vm_validate_and_restore_queue(&fpriv.userq_mgr) == -ENOMEM);
+    assert(!restored && !updates && !target_resv.owner && target_bo.refs == 1);
+    puts("UserQ restore: 13 reservation, residency and failure cases passed");
     return 0;
 }
 '''
