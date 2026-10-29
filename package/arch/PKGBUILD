@@ -2,7 +2,7 @@
 # Maintainer: Erhan Bilgili
 
 pkgname=salkim-kernel-modules-dkms
-pkgver=r6.gb01dc380d5e4
+pkgver=r45.g8a3ac3835b0c
 pkgrel=1
 pkgdesc='Salkim ntsync IOCP and Linux 7.3 AMDGPU kernel modules'
 arch=(any)

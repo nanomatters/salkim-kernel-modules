@@ -7,7 +7,7 @@ ccflags-y += -include $(src)/include/uapi/linux/ntsync.h
 else
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
-KBUILD_ARGS ?= LLVM=1
+KBUILD_ARGS ?= $(shell grep -q '^CONFIG_CC_IS_CLANG=y' "$(KDIR)/.config" && printf 'LLVM=1')
 
 .PHONY: all module tests test install clean
 
