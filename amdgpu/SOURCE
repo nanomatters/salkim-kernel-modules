@@ -1,0 +1,50 @@
+Baseline: upstream Linux v7.3, drivers/gpu/drm/amd.
+Source: https://github.com/torvalds/linux/tree/v7.3/drivers/gpu/drm/amd
+
+Driver-contained fixes and optimisations come from:
+https://github.com/nanomatters/kernel-salkim
+Branch: salkim-7.3
+Revision: 0b07b37e42fbfc27047d4ed7e64405d69dfd3005
+
+DRM core, scheduler, TTM and DMA-BUF changes are not imported. Display
+code remains at v7.3 apart from the AMDGPU scanout-position correction.
+The private AMDGPU UAPI header includes the matching sparse-batch interface.
+Local build changes add external-module Kbuild support and adjust the
+AMDGPU trace-header include path. Existing copyright notices are preserved.
+
+Imported commits, in order:
+3a4895191ef0 Fix TLB invalidation fence handling.
+5a40b5e98c85 Fix duplicate dependency fence releases.
+721cc31d008f Fix DC scanout position handling.
+197313a775f8 Correct BO mapping update tracking.
+6c6ec0d7410d Identify the root page directory by pointer.
+32fc662e8804 Keep PRT mappings off VM state lists.
+3c3b8dfbdce1 Wait for pending updates before switching to CPU updates.
+7d9f1d12f597 Release BO VA state when object open fails.
+2a6e06f03bb3 Recompute the size estimate after allocating an update job.
+ad3f05da0dd1 Reject anonymous user pointers spanning multiple VMAs.
+193f0ffb5210 Wait for GPU reset before freeing a KFD BO.
+eb2cfb1f91ea Mark KFD queues reset after a full GPU reset.
+a75bb01f9a18 Fix SVM BO lifetime during range cloning.
+b3773c3fabae Preserve SVM reference ownership.
+127deefc821d Fix concurrent doorbell allocation.
+1376e2da9ee7 Reject user-queue mappings without a backing BO.
+b31d89e253f3 Preserve submitted SDMA fences on rollover failure.
+e205b60ce0b1 Keep failed VM clears pending.
+54e1d6c59628 Complete prepared VM updates after errors.
+cfe16df322cf Factor VM update setup and completion.
+dccfddf840f6 Batch pending mappings per BO.
+bf488a5faa50 Batch freed VM range clears.
+611b865a084b Batch sparse VA operations.
+5b4f00802893 Share page-table update batches across BOs.
+6ffc769b7c48 Include PRT mappings in shared update batches.
+16fabec1447b Grow delayed VM update buffers on rollover.
+a31f5785af9b Scope sparse batch retirement records.
+30b796ae207e Honor completed batch dependencies.
+380c5c0e67ac Propagate KFD unmap clear failures.
+6b0ff1b4ba09 Retry pending clears before replacement mappings.
+86d9fe6a8c99 Clean up failed page-table allocations.
+e602da258235 Avoid duplicate GEM close error messages.
+be4473ddedee Restrict sparse batches to supported VMs.
+41f9014e43ad Update sparse batch ABI identifiers.
+0b07b37e42fb Make sparse batch acceptance input-only.

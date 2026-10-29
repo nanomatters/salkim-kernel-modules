@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+subdir-ccflags-y := -I$(srctree)/include/uapi/drm -include $(src)/include/uapi/drm/amdgpu_drm.h
+obj-m += drivers/gpu/drm/amd/amdgpu/
