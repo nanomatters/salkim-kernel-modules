@@ -247,7 +247,7 @@ int amdgpu_wbrf = -1;
 int amdgpu_damage_clips = -1; /* auto */
 int amdgpu_umsch_mm_fwlog;
 int amdgpu_rebar = -1; /* auto */
-int amdgpu_user_queue = -1;
+int amdgpu_user_queue = 1;
 uint amdgpu_hdmi_hpd_debounce_delay_ms;
 int amdgpu_ptl = -1; /* auto */
 
@@ -1100,10 +1100,10 @@ module_param_named(rebar, amdgpu_rebar, int, 0444);
  *
  * - -1 = auto (ASIC specific default)
  * -  0 = user queues disabled
- * -  1 = user queues enabled and kernel queues enabled (if supported)
+ * -  1 = user queues enabled and kernel queues enabled (if supported, default)
  * -  2 = user queues enabled and kernel queues disabled
  */
-MODULE_PARM_DESC(user_queue, "Enable user queues (-1 = auto (default), 0 = disable, 1 = enable, 2 = enable UQs and disable KQs)");
+MODULE_PARM_DESC(user_queue, "Enable user queues (-1 = auto, 0 = disable, 1 = enable (default), 2 = enable UQs and disable KQs)");
 module_param_named(user_queue, amdgpu_user_queue, int, 0444);
 
 /*
