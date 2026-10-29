@@ -1,4 +1,15 @@
-# Standalone ntsync
+# Salkim kernel modules
+
+One DKMS package provides ntsync with IOCP support and a modified AMDGPU driver
+for Linux 7.3.x.
+
+The AMDGPU source starts from upstream Linux 7.3 and carries the driver contained
+Salkim VM fixes and sparse mapping optimisations.
+
+AMDGPU is experimental and currently restricted to 7.3.x kernels with
+`CONFIG_DRM_AMDGPU=m`. Keep an unmodified kernel as a boot fallback.
+
+## ntsync
 
 This repository carries the upstream Linux `ntsync` driver as a single
 out-of-tree kernel module. It is the development tree for adding kernel-backed
@@ -33,7 +44,7 @@ sudo pacman -S --needed base-devel linux-cachyos-headers
 ```
 
 Other kernel variants need their corresponding headers package. Build the
-local `ntsync-iocp-dkms` package from the repository root with:
+local package from the repository root with:
 
 ```sh
 cd package/arch
@@ -43,20 +54,26 @@ makepkg -s
 Install the resulting package with:
 
 ```sh
-sudo pacman -U ./ntsync-iocp-dkms-*.pkg.tar.zst
+sudo pacman -U ./salkim-kernel-modules-dkms-*.pkg.tar.zst
 ```
 
-DKMS builds the module for each installed kernel that has matching headers.
-On Arch Linux and CachyOS, the module is installed under `updates/dkms`, which
-takes precedence over the in-tree `ntsync` module. Confirm the selected module
-for the running kernel with:
+DKMS builds ntsync for installed kernels with matching headers and AMDGPU for
+supported 7.3.x kernels. Modules are installed under `updates/dkms`.
+
+After DKMS installation, existing mkinitcpio presets are rebuilt if their
+images already contain AMDGPU for a 7.3.x kernel. Removal rebuilds those
+images again so they use the distribution driver. Other initramfs generators
+need their normal manual regeneration procedure.
+
+Confirm the selected modules with:
 
 ```sh
 modinfo -n ntsync
+modinfo -n amdgpu
 ```
 
-Installation does not replace a module that is already loaded. Reboot, or stop
-all processes using ntsync before reloading it:
+Installation does not replace modules that are already loaded. Reboot after
+installing AMDGPU. For ntsync alone, stop all processes using it before reloading:
 
 ```sh
 sudo modprobe -r ntsync
@@ -86,6 +103,12 @@ make KDIR=/path/to/kernel/build
 
 The resulting module is `ntsync.ko`. It has the same name as the in-tree
 module, so the installed module must be unloaded before loading this one.
+
+Build AMDGPU separately without installing it with:
+
+```sh
+make -C amdgpu KDIR=/path/to/kernel/build
+```
 
 ## Tests
 

@@ -1,17 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Maintainer: Erhan Bilgili
 
-_module=ntsync-iocp
-pkgname="$_module-dkms"
-pkgver=r2.g4e144a19d9f9
+pkgname=salkim-kernel-modules-dkms
+pkgver=r6.gb01dc380d5e4
 pkgrel=1
-pkgdesc='Wineland ntsync kernel module with I/O completion port support'
+pkgdesc='Salkim ntsync IOCP and Linux 7.3 AMDGPU kernel modules'
 arch=(any)
 url='https://github.com/nanomatters/ntsync-iocp'
 license=(GPL-2.0-only
-         'GPL-2.0-only WITH Linux-syscall-note')
+         'GPL-2.0-only WITH Linux-syscall-note'
+         MIT)
 depends=(dkms)
-makedepends=(git)
-provides=(NTSYNC-MODULE)
+optdepends=('mkinitcpio: refresh existing initramfs images containing AMDGPU')
+makedepends=(git rsync)
+provides=(NTSYNC-MODULE "ntsync-iocp-dkms=$pkgver")
+conflicts=(ntsync-iocp-dkms amdgpu-dkms)
+replaces=(ntsync-iocp-dkms)
+install=salkim-kernel-modules.install
 _source_dir="$startdir/../.."
 source=()
 sha256sums=()
@@ -23,7 +28,7 @@ pkgver() {
 }
 
 package() {
-  local dkms_source="$pkgdir/usr/src/$_module-$pkgver"
+  local dkms_source="$pkgdir/usr/src/ntsync-iocp-$pkgver"
 
   install -Dm644 "$_source_dir/Makefile" "$dkms_source/Makefile"
   install -Dm644 "$_source_dir/ntsync.c" "$dkms_source/ntsync.c"
@@ -36,8 +41,31 @@ package() {
     'BUILT_MODULE_NAME[0]="ntsync"' \
     'BUILT_MODULE_LOCATION[0]="."' \
     'DEST_MODULE_LOCATION[0]="/updates/dkms"' \
+    "MAKE[0]=\"'make' KDIR=/lib/modules/\${kernelver}/build module\"" \
     'AUTOINSTALL="yes"' \
     > "$dkms_source/dkms.conf"
+
+  dkms_source="$pkgdir/usr/src/amdgpu-salkim-$pkgver"
+  install -d "$dkms_source"
+  rsync -a --exclude='*.o' --exclude='*.ko' --exclude='*.cmd' \
+    --exclude='*.mod' --exclude='*.mod.c' --exclude=Module.symvers \
+    --exclude=modules.order --exclude=.tmp_versions/ \
+    "$_source_dir/amdgpu/" "$dkms_source/"
+  sed "s/@VERSION@/$pkgver/g" "$startdir/amdgpu-salkim.dkms.conf" \
+    > "$dkms_source/dkms.conf"
+
+  install -Dm644 "$startdir/95-salkim-amdgpu-initramfs.hook" \
+    "$pkgdir/usr/share/libalpm/hooks/95-salkim-amdgpu-initramfs.hook"
+  install -Dm755 "$startdir/salkim-kernel-modules.install" \
+    "$pkgdir/usr/share/libalpm/scripts/salkim-amdgpu-initramfs"
+  install -Dm644 "$_source_dir/amdgpu/LICENSES/preferred/MIT" \
+    "$pkgdir/usr/share/licenses/$pkgname/MIT"
+  install -Dm644 "$_source_dir/amdgpu/LICENSES/preferred/GPL-2.0" \
+    "$pkgdir/usr/share/licenses/$pkgname/GPL-2.0"
+  install -Dm644 "$_source_dir/amdgpu/LICENSES/exceptions/Linux-syscall-note" \
+    "$pkgdir/usr/share/licenses/$pkgname/Linux-syscall-note"
+  install -Dm644 "$_source_dir/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 
   install -Dm644 "$_source_dir/README.md" \
     "$pkgdir/usr/share/doc/$pkgname/README.md"

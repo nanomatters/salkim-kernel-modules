@@ -9,3 +9,7 @@ modules.order
 .modules.order.cmd
 tests/ntsync
 /.tmp_versions/
+package/arch/pkg/
+package/arch/src/
+package/arch/*.pkg.tar.*
+**/__pycache__/
