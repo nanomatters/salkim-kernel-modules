@@ -88,8 +88,9 @@ The running kernel's build tree is used by default:
 make
 ```
 
-The default uses LLVM because the CachyOS kernel is built with Clang. For a
-kernel built with GCC, clear the extra Kbuild arguments:
+The compiler is selected from the target kernel configuration. Clang-built
+kernels use LLVM and GCC-built kernels use GCC. To override the extra Kbuild
+arguments explicitly:
 
 ```sh
 make KBUILD_ARGS=
