@@ -97,6 +97,11 @@ extern "C" {
  */
 #define AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE	(1U << 0)
 
+/* Publish completion of page-table updates and required TLB invalidation.
+ * The caller supplies a nonzero output syncobj handle and timeline point.
+ */
+#define AMDGPU_GEM_VA_BATCH_VM_TIMELINE	(1U << 1)
+
 struct drm_amdgpu_info_gem_va_batch {
 	__u64 cookie;
 	__u32 max_ops;
@@ -116,13 +121,13 @@ struct drm_amdgpu_gem_va_batch_op {
 	__u64 map_size;
 };
 
-/* Batched GEM_VA acceptance for kernel-queue VMs, not async VM_BIND.
- * Probe INFO and match the cookie before use. Optional flags must be advertised
- * in features. Reserved fields must be zero. KFD, user-queue and CPU-updated VMs
- * must use the legacy GEM_VA path.
+/* Batched GEM_VA acceptance. Probe INFO and match the cookie before use.
+ * Optional flags must be advertised in features. KFD and CPU-updated VMs are
+ * not supported. User-queue VMs require VM_TIMELINE.
  *
- * A negative ioctl return leaves every mapping unchanged. A zero return accepts
- * the entire array, in order. The request is input-only, so no copy-out can fail
+ * Without VM_TIMELINE, reserved fields must be zero and a negative ioctl return
+ * leaves every mapping unchanged. A zero return accepts the entire array,
+ * in order. The request is input-only, so no copy-out can fail
  * after acceptance. There is no partial count, secondary status or safe replay
  * of a successful request.
  *
@@ -132,14 +137,34 @@ struct drm_amdgpu_gem_va_batch_op {
  * successfully before submitting commands. Existing update-fence dependencies
  * and TLB-invalidation rules remain in effect. Persistent update failures are
  * reported by command submission, not by replaying the accepted batch.
- * No userspace semaphore is signaled by this ioctl.
+ * No userspace semaphore is signaled in this mode.
+ *
+ * With VM_TIMELINE, zero means all mappings were accepted and the output point
+ * was published. Wait for that point before using the mappings. Completion
+ * covers every affected BO, page directories and required TLB invalidation.
+ * Asynchronous failures remain recorded on the VM. Once observed, they fail
+ * later mapping and CS ioctls, scheduler jobs and USERQ_WAIT checks. This does
+ * not stop running user queues or clients that bypass USERQ_WAIT.
+ * EBUSY means the VM or a target BO is not resident and nothing was changed.
+ * EIO is terminal. Mappings may already have changed and the request must not
+ * be replayed or followed by GPU work using this VM. Other errors leave mappings
+ * unchanged. No point is published on an ioctl error. The caller must serialize
+ * updates to its output timeline and advance the point only on success.
+ * The WAIT_COMPLETE flag retains its independent meaning in both modes.
  */
 struct drm_amdgpu_gem_va_batch {
 	__u64 cookie;
 	__u64 operations;
 	__u32 count;
 	__u32 flags;
-	__u64 reserved[2];
+	union {
+		__u64 reserved[2];
+		struct {
+			__u32 vm_timeline_syncobj_out;
+			__u32 pad;
+			__u64 vm_timeline_point;
+		};
+	};
 };
 
 /**
@@ -1376,6 +1401,12 @@ struct drm_amdgpu_info {
 			__u32 id;
 			__u32 _pad;
 		} mode_crtc;
+
+		struct {
+			/* Zero probes legacy batches. VM_TIMELINE opts into that mode. */
+			__u32 flags;
+			__u32 pad;
+		} gem_va_batch;
 
 		struct {
 			/** AMDGPU_HW_IP_* */

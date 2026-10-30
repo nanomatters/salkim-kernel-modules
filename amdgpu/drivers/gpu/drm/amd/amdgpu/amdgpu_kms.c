@@ -675,15 +675,20 @@ int amdgpu_info_ioctl(struct drm_device *dev, void *data, struct drm_file *filp)
 
 	switch (info->query) {
 	case AMDGPU_INFO_GEM_VA_BATCH: {
+		bool timeline = info->gem_va_batch.flags & AMDGPU_GEM_VA_BATCH_VM_TIMELINE;
 		struct drm_amdgpu_info_gem_va_batch caps = {
 			.cookie = AMDGPU_GEM_VA_BATCH_COOKIE,
 			.max_ops = AMDGPU_GEM_VA_BATCH_MAX_OPS,
 		};
 
+		if ((info->gem_va_batch.flags & ~AMDGPU_GEM_VA_BATCH_VM_TIMELINE) ||
+		    info->gem_va_batch.pad)
+			return -EINVAL;
 		fpriv = filp->driver_priv;
-		if (!amdgpu_gem_va_batch_supported(adev, &fpriv->vm))
+		if (!amdgpu_gem_va_batch_supported(adev, &fpriv->vm, timeline))
 			return -EOPNOTSUPP;
-		caps.features = AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE;
+		caps.features = AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE |
+				AMDGPU_GEM_VA_BATCH_VM_TIMELINE;
 		return copy_to_user(out, &caps, min_t(u32, size, sizeof(caps))) ?
 			-EFAULT : 0;
 	}
