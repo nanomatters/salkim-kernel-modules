@@ -58,7 +58,7 @@ amdgpu_userq_fence_write(struct amdgpu_userq_fence_driver *fence_drv,
 		*fence_drv->cpu_addr = cpu_to_le64(seq);
 }
 
-int amdgpu_userq_fence_driver_alloc(struct amdgpu_device *adev,
+int amdgpu_userq_fence_driver_alloc(struct amdgpu_device *adev, u64 client_id,
 				    struct amdgpu_userq_fence_driver **fence_drv_req)
 {
 	struct amdgpu_userq_fence_driver *fence_drv;
@@ -85,6 +85,7 @@ int amdgpu_userq_fence_driver_alloc(struct amdgpu_device *adev,
 	spin_lock_init(&fence_drv->fence_list_lock);
 
 	fence_drv->adev = adev;
+	fence_drv->client_id = client_id;
 	fence_drv->context = dma_fence_context_alloc(1);
 	get_task_comm(fence_drv->timeline_name, current);
 
@@ -637,6 +638,16 @@ free_syncobj_handles:
 	return r;
 }
 
+/* Match the CS owner policy only for implicit UserQ dependencies. */
+static bool amdgpu_userq_fence_is_same_client(struct dma_fence *fence,
+					      struct drm_file *filp)
+{
+	struct amdgpu_userq_fence *userq_fence = to_amdgpu_userq_fence(fence);
+
+	/* The copied ID stays unique after the DRM file is closed. */
+	return userq_fence && userq_fence->fence_drv->client_id == filp->client_id;
+}
+
 /* Count the number of expected fences so userspace can alloc a buffer */
 static int
 amdgpu_userq_wait_count_fences(struct drm_file *filp,
@@ -713,7 +724,8 @@ amdgpu_userq_wait_count_fences(struct drm_file *filp,
 
 		dma_resv_for_each_fence(&resv_cursor, gobj_read[i]->resv,
 					DMA_RESV_USAGE_READ, fence)
-			num_fences++;
+			if (!amdgpu_userq_fence_is_same_client(fence, filp))
+				num_fences++;
 	}
 
 	/* Count write fences */
@@ -723,7 +735,8 @@ amdgpu_userq_wait_count_fences(struct drm_file *filp,
 
 		dma_resv_for_each_fence(&resv_cursor, gobj_write[i]->resv,
 					DMA_RESV_USAGE_WRITE, fence)
-			num_fences++;
+			if (!amdgpu_userq_fence_is_same_client(fence, filp))
+				num_fences++;
 	}
 
 	wait_info->num_fences = min(num_fences, USHRT_MAX);
@@ -848,6 +861,9 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 
 		dma_resv_for_each_fence(&resv_cursor, gobj_read[i]->resv,
 					DMA_RESV_USAGE_READ, fence) {
+			if (amdgpu_userq_fence_is_same_client(fence, filp))
+				continue;
+
 			r = amdgpu_userq_wait_add_fence(wait_info, fences,
 							&num_fences, fence);
 			if (r)
@@ -862,6 +878,9 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 
 		dma_resv_for_each_fence(&resv_cursor, gobj_write[i]->resv,
 					DMA_RESV_USAGE_WRITE, fence) {
+			if (amdgpu_userq_fence_is_same_client(fence, filp))
+				continue;
+
 			r = amdgpu_userq_wait_add_fence(wait_info, fences,
 							&num_fences, fence);
 			if (r)

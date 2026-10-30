@@ -692,7 +692,8 @@ amdgpu_userq_create(struct drm_file *filp, union drm_amdgpu_userq *args)
 	INIT_DELAYED_WORK(&queue->hang_detect_work,
 			  amdgpu_userq_hang_detect_work);
 
-	r = amdgpu_userq_fence_driver_alloc(adev, &queue->fence_drv);
+	r = amdgpu_userq_fence_driver_alloc(adev, filp->client_id,
+					    &queue->fence_drv);
 	if (r)
 		goto free_queue;
 

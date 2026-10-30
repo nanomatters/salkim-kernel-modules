@@ -48,6 +48,7 @@ struct amdgpu_userq_fence_driver {
 	u64 gpu_addr;
 	u64 *cpu_addr;
 	u64 context;
+	u64 client_id;
 	/*
 	 * This lock is necesaary to synchronize the access
 	 * to the fences list by the fence driver.
@@ -60,7 +61,7 @@ struct amdgpu_userq_fence_driver {
 
 void amdgpu_userq_fence_driver_get(struct amdgpu_userq_fence_driver *fence_drv);
 void amdgpu_userq_fence_driver_put(struct amdgpu_userq_fence_driver *fence_drv);
-int amdgpu_userq_fence_driver_alloc(struct amdgpu_device *adev,
+int amdgpu_userq_fence_driver_alloc(struct amdgpu_device *adev, u64 client_id,
 				    struct amdgpu_userq_fence_driver **fence_drv_req);
 void amdgpu_userq_fence_driver_free(struct amdgpu_usermode_queue *userq);
 int amdgpu_userq_fence_driver_process(struct amdgpu_userq_fence_driver *fence_drv);
