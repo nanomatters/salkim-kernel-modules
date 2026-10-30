@@ -751,11 +751,22 @@ error_unlock:
 static int
 amdgpu_userq_wait_add_fence(struct drm_amdgpu_userq_wait *wait_info,
 			    struct dma_fence **fences, unsigned int *num_fences,
-			    struct dma_fence *fence)
+			    struct dma_fence *fence, bool propagate_error)
 {
+	int r;
+
+	r = propagate_error ? dma_fence_get_status(fence) : 0;
+	if (r < 0)
+		return r;
+
 	/* As fallback shouldn't userspace allocate enough space */
-	if (*num_fences >= wait_info->num_fences)
-		return dma_fence_wait(fence, true);
+	if (*num_fences >= wait_info->num_fences) {
+		r = dma_fence_wait(fence, true);
+		if (r)
+			return r;
+		r = propagate_error ? dma_fence_get_status(fence) : 0;
+		return r < 0 ? r : 0;
+	}
 
 	fences[(*num_fences)++] = dma_fence_get(fence);
 	return 0;
@@ -777,7 +788,7 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 	struct dma_fence **fences, *fence, *f;
 	struct dma_fence_unwrap iter;
 	int num_points, num_syncobj;
-	unsigned int num_fences = 0;
+	unsigned int num_fences = 0, num_explicit_fences;
 	struct drm_exec exec;
 	int i, cnt, r;
 
@@ -803,16 +814,16 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 		if (r)
 			goto free_fences;
 
+		/* Finish the iterator on failure to release its chain reference. */
 		dma_fence_unwrap_for_each(f, &iter, fence) {
-			r = amdgpu_userq_wait_add_fence(wait_info, fences,
-							&num_fences, f);
-			if (r) {
-				dma_fence_put(fence);
-				goto free_fences;
-			}
+			if (!r)
+				r = amdgpu_userq_wait_add_fence(wait_info, fences,
+								&num_fences, f, true);
 		}
 
 		dma_fence_put(fence);
+		if (r)
+			goto free_fences;
 	}
 
 	/* Retrieve boolean fences */
@@ -827,12 +838,15 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 			goto free_fences;
 
 		r = amdgpu_userq_wait_add_fence(wait_info, fences,
-						&num_fences, fence);
+						&num_fences, fence, true);
 		dma_fence_put(fence);
 		if (r)
 			goto free_fences;
 
 	}
+
+	/* Keep explicit dependencies separate from implicit reservation fences. */
+	num_explicit_fences = num_fences;
 
 	/* Lock all the GEM objects */
 	num_read_bo_handles = wait_info->num_bo_read_handles;
@@ -865,7 +879,7 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 				continue;
 
 			r = amdgpu_userq_wait_add_fence(wait_info, fences,
-							&num_fences, fence);
+							&num_fences, fence, false);
 			if (r)
 				goto error_unlock;
 		}
@@ -882,13 +896,32 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 				continue;
 
 			r = amdgpu_userq_wait_add_fence(wait_info, fences,
-							&num_fences, fence);
+							&num_fences, fence, false);
 			if (r)
 				goto error_unlock;
 		}
 	}
 
 	drm_exec_fini(&exec);
+
+	/* Preserve explicit errors before deduplication drops older fences. */
+	for (i = 0; i < num_fences; i++) {
+		if (i < num_explicit_fences) {
+			r = dma_fence_get_status(fences[i]);
+			if (r < 0)
+				goto free_fences;
+		}
+		if (!to_amdgpu_userq_fence(fences[i])) {
+			r = dma_fence_wait(fences[i], true);
+			if (r)
+				goto free_fences;
+			if (i < num_explicit_fences) {
+				r = dma_fence_get_status(fences[i]);
+				if (r < 0)
+					goto free_fences;
+			}
+		}
+	}
 
 	/*
 	 * Keep only the latest fences to reduce the number of values
@@ -908,17 +941,8 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 		u32 index;
 
 		userq_fence = to_amdgpu_userq_fence(fences[i]);
-		if (!userq_fence) {
-			/*
-			 * Just waiting on other driver fences should
-			 * be good for now
-			 */
-			r = dma_fence_wait(fences[i], true);
-			if (r)
-				goto put_waitq;
-
+		if (!userq_fence)
 			continue;
-		}
 
 		fence_drv = userq_fence->fence_drv;
 		/*
