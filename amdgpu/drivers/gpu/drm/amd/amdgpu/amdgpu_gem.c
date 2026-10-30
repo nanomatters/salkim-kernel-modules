@@ -899,6 +899,10 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 	unsigned int i;
 	int r = 0;
 
+	r = amdgpu_vm_batch_status(&fpriv->vm);
+	if (r)
+		return r;
+
 	/* Validate virtual address range against reserved regions. */
 	if (args->va_address < AMDGPU_VA_RESERVED_BOTTOM) {
 		dev_dbg(dev->dev,

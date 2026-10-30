@@ -197,6 +197,7 @@ static struct dma_fence *merge(unsigned count, struct dma_fence **array)
 }
 #define dma_fence_unwrap_merge(...) merge(ARRAY_SIZE(((struct dma_fence *[]){__VA_ARGS__})), \
                                            (struct dma_fence *[]){__VA_ARGS__})
+static int amdgpu_vm_batch_status(struct amdgpu_vm *vm) { return 0; }
 static bool amdgpu_vm_ready(struct amdgpu_vm *vm) { return vm_ready; }
 static int amdgpu_vm_clear_freed(struct amdgpu_device *dev, struct amdgpu_vm *vm,
                                 struct dma_fence **out)
