@@ -23,6 +23,7 @@
  */
 
 #include <linux/dma-fence.h>
+#include <linux/dma-fence-unwrap.h>
 #include <linux/workqueue.h>
 
 #include "amdgpu.h"
@@ -49,23 +50,46 @@ static const char *amdgpu_tlb_fence_get_timeline_name(struct dma_fence *f)
 	return "amdgpu tlb timeline";
 }
 
+static int amdgpu_tlb_fence_flush(struct amdgpu_device *adev, uint16_t pasid,
+				  struct dma_fence *dependency)
+{
+	int r = 0, ret;
+
+	if (dependency) {
+		struct dma_fence_unwrap iter;
+		struct dma_fence *fence;
+
+		r = dma_fence_wait(dependency, false);
+		if (r)
+			return r;
+		r = dma_fence_get_status(dependency);
+		if (r > 0)
+			r = 0;
+		/* Polling an already completed array can hide a child error. */
+		dma_fence_unwrap_for_each(fence, &iter, dependency) {
+			ret = dma_fence_get_status(fence);
+			if (ret < 0 && !r)
+				r = ret;
+		}
+	}
+
+	/* Failed updates may still have written part of the page tables. */
+	ret = amdgpu_gmc_flush_gpu_tlb_pasid(adev, pasid, 2, true, 0);
+	if (ret)
+		dev_err(adev->dev, "TLB flush failed for PASID %d.\n", pasid);
+	return r ?: ret;
+}
+
 static void amdgpu_tlb_fence_work(struct work_struct *work)
 {
 	struct amdgpu_tlb_fence *f = container_of(work, typeof(*f), work);
 	int r;
 
-	if (f->dependency) {
-		dma_fence_wait(f->dependency, false);
-		dma_fence_put(f->dependency);
-		f->dependency = NULL;
-	}
-
-	r = amdgpu_gmc_flush_gpu_tlb_pasid(f->adev, f->pasid, 2, true, 0);
-	if (r) {
-		dev_err(f->adev->dev, "TLB flush failed for PASID %d.\n",
-			f->pasid);
+	r = amdgpu_tlb_fence_flush(f->adev, f->pasid, f->dependency);
+	dma_fence_put(f->dependency);
+	f->dependency = NULL;
+	if (r)
 		dma_fence_set_error(&f->base, r);
-	}
 
 	dma_fence_signal(&f->base);
 	dma_fence_put(&f->base);
@@ -85,25 +109,27 @@ static const struct dma_fence_ops amdgpu_tlb_fence_ops = {
  *
  * Creates a TLB invalidation fence which signals when all the VMIDs assigned to
  * the PASID of the VM are invalidated.
+ * Returns an error if synchronous invalidation fails. Asynchronous failures
+ * are reported through the returned fence.
  */
-void amdgpu_vm_tlb_fence_create(struct amdgpu_device *adev,
-				struct amdgpu_vm *vm,
-				struct dma_fence *dep,
-				struct dma_fence **fence)
+int amdgpu_vm_tlb_fence_create(struct amdgpu_device *adev,
+			       struct amdgpu_vm *vm,
+			       struct dma_fence *dep,
+			       struct dma_fence **fence)
 {
 	struct amdgpu_tlb_fence *f;
+	int r;
 
 	f = kmalloc_obj(*f);
 	if (!f) {
-		/*
-		 * We can't fail since the PDEs and PTEs are already updated, so
-		 * just block for the dependency and execute the TLB flush
-		 */
-		if (dep)
-			dma_fence_wait(dep, false);
+		/* Preserve update ordering without an asynchronous fence. */
+		r = amdgpu_tlb_fence_flush(adev, vm->pasid, dep);
+		if (r)
+			return r;
 
-		amdgpu_gmc_flush_gpu_tlb_pasid(adev, vm->pasid, 2, true, 0);
-		return;
+		dma_fence_put(*fence);
+		*fence = dma_fence_get_stub();
+		return 0;
 	}
 
 	f->adev = adev;
@@ -121,4 +147,5 @@ void amdgpu_vm_tlb_fence_create(struct amdgpu_device *adev,
 
 	dma_fence_put(*fence);
 	*fence = &f->base;
+	return 0;
 }

@@ -700,10 +700,10 @@ void amdgpu_vm_update_fault_cache(struct amdgpu_device *adev,
 				  uint64_t addr,
 				  uint32_t status,
 				  unsigned int vmhub);
-void amdgpu_vm_tlb_fence_create(struct amdgpu_device *adev,
-				struct amdgpu_vm *vm,
-				struct dma_fence *dep,
-				struct dma_fence **fence);
+int amdgpu_vm_tlb_fence_create(struct amdgpu_device *adev,
+			       struct amdgpu_vm *vm,
+			       struct dma_fence *dep,
+			       struct dma_fence **fence);
 void amdgpu_vm_print_task_info(struct amdgpu_device *adev,
 			       struct amdgpu_task_info *task_info);
 
