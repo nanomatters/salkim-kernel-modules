@@ -33,6 +33,7 @@
 #include <linux/pci.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-fence-unwrap.h>
+#include <linux/dma-fence-array.h>
 #include <linux/uaccess.h>
 
 #include <drm/amdgpu_drm.h>
@@ -1100,13 +1101,14 @@ error_put_gobj:
 	return r;
 }
 
-/* Deferred updates rely on the kernel command-submission validation path. */
+/* Only the legacy mode relies on subsequent kernel command submission. */
 bool amdgpu_gem_va_batch_supported(struct amdgpu_device *adev,
-				   struct amdgpu_vm *vm)
+				   struct amdgpu_vm *vm, bool timeline)
 {
 	return !adev->debug_vm && !vm->use_cpu_for_update &&
-		!vm->is_compute_context && !vm->need_tlb_fence &&
-		!amdgpu_userq_enabled(adev_to_drm(adev));
+		!vm->is_compute_context &&
+		(timeline || (!vm->need_tlb_fence &&
+			      !amdgpu_userq_enabled(adev_to_drm(adev))));
 }
 
 struct amdgpu_va_batch_entry {
@@ -1114,6 +1116,25 @@ struct amdgpu_va_batch_entry {
 	struct amdgpu_bo_va *bo_va;
 	struct amdgpu_bo_va_mapping *maps[3];
 };
+
+/* Storage is reserved before any mappings change. Do not discard error fences. */
+static struct dma_fence *
+amdgpu_gem_va_batch_fence(struct amdgpu_vm *vm, struct xarray *bos,
+			  struct dma_fence_array *array, struct dma_fence **fences)
+{
+	struct amdgpu_bo_va *bo_va;
+	unsigned long index;
+	unsigned int count = 0;
+
+	fences[count++] = dma_fence_get(vm->last_update);
+	fences[count++] = dma_fence_get(vm->last_tlb_inv);
+	xa_for_each(bos, index, bo_va)
+		if (bo_va->last_pt_update)
+			fences[count++] = dma_fence_get(bo_va->last_pt_update);
+
+	dma_fence_array_init(array, count, fences, dma_fence_context_alloc(1), 1);
+	return &array->base;
+}
 
 int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 			    struct drm_file *filp)
@@ -1127,21 +1148,41 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 	struct drm_amdgpu_gem_va_batch_op *ops;
 	struct amdgpu_va_batch_entry *entries;
 	struct amdgpu_bo_va *bo_va;
+	struct drm_syncobj *timeline_syncobj = NULL;
+	struct dma_fence_chain *timeline_chain = NULL;
+	struct dma_fence_array *array = NULL;
+	struct dma_fence **fences = NULL;
+	struct dma_fence *previous_tlb = NULL;
+	struct amdgpu_vm_batch_entry *batch_entry = NULL;
 	struct drm_exec exec;
 	DEFINE_XARRAY(bos);
 	LIST_HEAD(freed);
 	bool explicit_sync = args->flags & AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE;
+	bool timeline = args->flags & AMDGPU_GEM_VA_BATCH_VM_TIMELINE;
+	bool accepted = false;
+	u64 tlb_seq = 0;
+	unsigned int num_bos = 0;
+	unsigned long index;
 	u64 end, vm_size = adev->vm_manager.max_pfn * AMDGPU_GPU_PAGE_SIZE;
 	u32 i, j;
 	int r;
 
 	if (args->cookie != AMDGPU_GEM_VA_BATCH_COOKIE ||
-	    (args->flags & ~AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE) ||
-	    args->reserved[0] || args->reserved[1] ||
+	    (args->flags & ~(AMDGPU_GEM_VA_BATCH_WAIT_COMPLETE |
+			     AMDGPU_GEM_VA_BATCH_VM_TIMELINE)) ||
 	    !args->count || args->count > AMDGPU_GEM_VA_BATCH_MAX_OPS)
 		return -EINVAL;
-	if (!amdgpu_gem_va_batch_supported(adev, vm))
+	if (timeline) {
+		if (!args->vm_timeline_syncobj_out || !args->vm_timeline_point || args->pad)
+			return -EINVAL;
+	} else if (args->reserved[0] || args->reserved[1]) {
+		return -EINVAL;
+	}
+	if (!amdgpu_gem_va_batch_supported(adev, vm, timeline))
 		return -EOPNOTSUPP;
+	r = amdgpu_vm_batch_status(vm);
+	if (r)
+		return r;
 	ops = vmemdup_user(u64_to_user_ptr(args->operations),
 			  array_size(args->count, sizeof(*ops)));
 	if (IS_ERR(ops))
@@ -1150,6 +1191,14 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 	if (!entries) {
 		kvfree(ops);
 		return -ENOMEM;
+	}
+
+	if (timeline) {
+		r = amdgpu_gem_update_timeline_node(filp, args->vm_timeline_syncobj_out,
+						    args->vm_timeline_point, &timeline_syncobj,
+						    &timeline_chain);
+		if (r)
+			goto out;
 	}
 
 	/* No mapping mutation or GPU submission during preparation. */
@@ -1207,10 +1256,28 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 		drm_exec_retry_on_contention(&exec);
 		if (r)
 			goto unlock;
+		if (!timeline)
+			continue;
+		for (i = 0; i < args->count; ++i) {
+			for (j = 0; j < 2; ++j) {
+				bo_va = amdgpu_gem_va_batch_boundary(vm, &ops[i], j);
+				if (!bo_va || !bo_va->base.bo)
+					continue;
+				r = drm_exec_lock_obj(&exec, &bo_va->base.bo->tbo.base);
+				drm_exec_retry_on_contention(&exec);
+				if (r)
+					goto unlock;
+			}
+		}
 	}
 	/* KFD can change the VM mode after the capability probe. */
-	if (!amdgpu_gem_va_batch_supported(adev, vm)) {
+	if (!amdgpu_gem_va_batch_supported(adev, vm, timeline)) {
 		r = -EOPNOTSUPP;
+		goto unlock;
+	}
+	/* User queues cannot delegate an accepted update to a later CS. */
+	if (timeline && !amdgpu_vm_ready(vm)) {
+		r = -EBUSY;
 		goto unlock;
 	}
 	for (i = 0; i < args->count; ++i) {
@@ -1227,7 +1294,49 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 			goto unlock;
 	}
 
+	if (timeline) {
+		for (i = 0; i < args->count; ++i) {
+			for (j = 0; j < 2; ++j) {
+				bo_va = amdgpu_gem_va_batch_boundary(vm, &ops[i], j);
+				if (!bo_va)
+					continue;
+				r = xa_err(xa_store(&bos, (unsigned long)bo_va, bo_va,
+						    GFP_KERNEL));
+				if (r)
+					goto unlock;
+			}
+		}
+		xa_for_each(&bos, index, bo_va) {
+			struct amdgpu_bo *bo = bo_va->base.bo;
+
+			if (bo && (!bo->tbo.resource ||
+				   bo->tbo.resource->mem_type == TTM_PL_SYSTEM)) {
+				r = -EBUSY;
+				goto unlock;
+			}
+		}
+	}
+
+	if (timeline) {
+		/* Size completion storage for the actual distinct BO set. */
+		xa_for_each(&bos, index, bo_va)
+			++num_bos;
+		array = dma_fence_array_alloc(num_bos + 2);
+		fences = kmalloc_array(num_bos + 2, sizeof(*fences), GFP_KERNEL);
+		batch_entry = kzalloc_obj(*batch_entry);
+		if (!array || !fences || !batch_entry) {
+			r = -ENOMEM;
+			goto unlock;
+		}
+		r = amdgpu_vm_batch_prepare(vm);
+		if (r)
+			goto unlock;
+		previous_tlb = dma_fence_get(vm->last_tlb_inv);
+		tlb_seq = atomic64_read(&vm->tlb_seq);
+	}
+
 	/* This phase consumes the prepared records and cannot fail. */
+	accepted = true;
 	for (i = 0; i < args->count; ++i)
 		amdgpu_vm_bo_replace_map_prealloc(adev, entries[i].bo_va,
 			ops[i].va_address, ops[i].offset_in_bo, ops[i].map_size,
@@ -1236,9 +1345,9 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 	if (!explicit_sync)
 		list_splice_init(&freed, &vm->freed);
 
-	/* Like GEM_VA, leave updates pending until CS validates the VM. */
+	/* Only the legacy mode can leave updates pending for CS validation. */
 	if (!amdgpu_vm_ready(vm)) {
-		r = 0;
+		r = timeline ? -EIO : 0;
 		goto unlock;
 	}
 
@@ -1251,16 +1360,65 @@ int amdgpu_gem_va_batch_ioctl(struct drm_device *dev, void *data,
 		r = amdgpu_vm_bo_update_batch(adev, vm, &bos);
 	if (!r)
 		r = amdgpu_vm_update_pdes(adev, vm, false);
+	if (timeline) {
+		struct dma_fence *fence;
+
+		/* Never turn an incomplete accepted batch into successful completion. */
+		if (r) {
+			r = -EIO;
+			goto unlock;
+		}
+		fence = amdgpu_gem_va_batch_fence(vm, &bos, array, fences);
+		array = NULL;
+		fences = NULL;
+		if (vm->need_tlb_fence &&
+		    (atomic64_read(&vm->tlb_seq) != tlb_seq ||
+		     vm->last_tlb_inv != previous_tlb)) {
+			/* Earlier PTE flushes may precede the final PDE update. */
+			r = amdgpu_vm_tlb_fence_create(adev, vm, fence, &vm->last_tlb_inv);
+			dma_fence_put(fence);
+			if (r) {
+				r = -EIO;
+				goto unlock;
+			}
+			dma_resv_add_fence(vm->root.bo->tbo.base.resv,
+					   vm->last_tlb_inv, DMA_RESV_USAGE_BOOKKEEP);
+			fence = dma_fence_get(vm->last_tlb_inv);
+		}
+		amdgpu_vm_batch_track(vm, batch_entry, fence);
+		batch_entry = NULL;
+		r = amdgpu_vm_batch_status(vm);
+		if (r) {
+			dma_fence_put(fence);
+			goto unlock;
+		}
+		drm_syncobj_add_point(timeline_syncobj, timeline_chain, fence,
+				      args->vm_timeline_point);
+		timeline_chain = NULL;
+		dma_fence_put(fence);
+		goto unlock;
+	}
 	/* Acceptance is final. CS retries unfinished clears, mappings and PDEs. */
 	if (r)
 		dev_dbg_ratelimited(adev->dev,
 				    "Deferred batch page-table update after error %d\n", r);
 	r = 0;
 unlock:
+	if (timeline && accepted && r) {
+		amdgpu_vm_batch_error(vm);
+		r = -EIO;
+	}
 	/* Deferred or failed retirements resume on the conservative path. */
 	list_splice_init(&freed, &vm->freed);
 	drm_exec_fini(&exec);
 out:
+	dma_fence_put(previous_tlb);
+	kfree(batch_entry);
+	kfree(array);
+	kfree(fences);
+	dma_fence_chain_free(timeline_chain);
+	if (timeline_syncobj)
+		drm_syncobj_put(timeline_syncobj);
 	xa_destroy(&bos);
 	for (i = 0; i < args->count; ++i) {
 		for (j = 0; j < ARRAY_SIZE(entries[i].maps); ++j)
