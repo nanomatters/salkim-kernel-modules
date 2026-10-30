@@ -763,11 +763,32 @@ out:
 	return r;
 }
 
+/* A split can replace a huge PDE with an empty PT. Rewrite its survivors too. */
+static struct amdgpu_bo_va *
+amdgpu_gem_va_batch_boundary(struct amdgpu_vm *vm,
+			     const struct drm_amdgpu_gem_va_batch_op *op, bool end)
+{
+	u64 addr = end ? op->va_address + op->map_size - 1 : op->va_address;
+	struct amdgpu_bo_va_mapping *mapping = amdgpu_vm_bo_lookup_mapping(vm, addr);
+
+	if (!mapping)
+		return NULL;
+	if (end ? mapping->last <= addr / AMDGPU_GPU_PAGE_SIZE :
+		  mapping->start >= addr / AMDGPU_GPU_PAGE_SIZE)
+		return NULL;
+	return mapping->bo_va;
+}
+
 static struct dma_fence *
 amdgpu_gem_va_update_fence(struct amdgpu_vm *vm,
-			   struct amdgpu_bo_va *bo_va, uint32_t operation)
+			   struct amdgpu_bo_va *bo_va, uint32_t operation,
+			   struct amdgpu_bo_va **survivors)
 {
-	struct dma_fence *bo_fence = NULL, *fence;
+	struct dma_fence *bo_fence = NULL, *fence, *survivor_fences[2];
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(survivor_fences); ++i)
+		survivor_fences[i] = survivors[i] ? survivors[i]->last_pt_update : NULL;
 
 	if ((operation == AMDGPU_VA_OP_MAP ||
 	     operation == AMDGPU_VA_OP_REPLACE) &&
@@ -776,13 +797,16 @@ amdgpu_gem_va_update_fence(struct amdgpu_vm *vm,
 
 	/* Do not carry completed failures into subsequent updates. */
 	fence = dma_fence_unwrap_merge(vm->last_update, vm->last_tlb_inv,
-				      bo_fence);
+				      bo_fence, survivor_fences[0], survivor_fences[1]);
 	if (!fence) {
 		/* Allocation failure must not drop any pending dependency. */
 		dma_fence_wait(vm->last_update, false);
 		dma_fence_wait(vm->last_tlb_inv, false);
 		if (bo_fence)
 			dma_fence_wait(bo_fence, false);
+		for (i = 0; i < ARRAY_SIZE(survivor_fences); ++i)
+			if (survivor_fences[i])
+				dma_fence_wait(survivor_fences[i], false);
 		fence = dma_fence_get_stub();
 	}
 	return fence;
@@ -795,6 +819,7 @@ amdgpu_gem_va_update_fence(struct amdgpu_vm *vm,
  * @vm: vm to update
  * @bo_va: bo_va to update
  * @operation: map, unmap or clear
+ * @survivors: original owners of partially replaced boundary mappings
  *
  * Update the bo_va directly after setting its address. Errors are not
  * vital here, so they are not reported back to userspace.
@@ -806,8 +831,9 @@ static struct dma_fence *
 amdgpu_gem_va_update_vm(struct amdgpu_device *adev,
 			struct amdgpu_vm *vm,
 			struct amdgpu_bo_va *bo_va,
-			uint32_t operation)
+			u32 operation, struct amdgpu_bo_va **survivors)
 {
+	unsigned int i;
 	int r = 0;
 
 	/* If the VM is not ready return only a stub. */
@@ -827,6 +853,15 @@ amdgpu_gem_va_update_vm(struct amdgpu_device *adev,
 			goto out;
 	}
 
+	for (i = 0; i < 2; ++i) {
+		if (!survivors[i] || survivors[i] == bo_va ||
+		    (i && survivors[i] == survivors[0]))
+			continue;
+		r = amdgpu_vm_bo_update(adev, survivors[i], false);
+		if (r)
+			goto out;
+	}
+
 	/* Always update PDEs after we touched the mappings. */
 	r = amdgpu_vm_update_pdes(adev, vm, false);
 
@@ -834,7 +869,7 @@ out:
 	if (r && r != -ERESTARTSYS)
 		DRM_ERROR("Couldn't update BO_VA (%d)\n", r);
 
-	return amdgpu_gem_va_update_fence(vm, bo_va, operation);
+	return amdgpu_gem_va_update_fence(vm, bo_va, operation, survivors);
 }
 
 int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
@@ -852,11 +887,16 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 	struct amdgpu_device *adev = drm_to_adev(dev);
 	struct amdgpu_fpriv *fpriv = filp->driver_priv;
 	struct amdgpu_bo *abo;
-	struct amdgpu_bo_va *bo_va;
+	struct amdgpu_bo_va *bo_va, *survivors[2] = {};
+	struct drm_amdgpu_gem_va_batch_op replace;
+	bool update_survivors = args->vm_timeline_syncobj_out &&
+		(args->operation == AMDGPU_VA_OP_REPLACE ||
+		 args->operation == AMDGPU_VA_OP_CLEAR);
 	struct drm_syncobj *timeline_syncobj = NULL;
 	struct dma_fence_chain *timeline_chain = NULL;
 	struct drm_exec exec;
 	uint64_t vm_size, tmp;
+	unsigned int i;
 	int r = 0;
 
 	/* Validate virtual address range against reserved regions. */
@@ -921,6 +961,17 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 		abo = NULL;
 	}
 
+	if (update_survivors) {
+		u64 offset = args->operation == AMDGPU_VA_OP_CLEAR ? 0 : args->offset_in_bo;
+
+		r = amdgpu_vm_verify_parameters(adev, abo, args->va_address,
+						offset, args->map_size);
+		if (r)
+			goto error_put_gobj;
+		replace.va_address = args->va_address;
+		replace.map_size = args->map_size;
+	}
+
 	/* Add input syncobj fences (if any) for synchronization. */
 	r = amdgpu_gem_add_input_fence(filp,
 				       args->input_fence_syncobj_handles,
@@ -942,6 +993,18 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 		drm_exec_retry_on_contention(&exec);
 		if (unlikely(r))
 			goto error;
+		if (update_survivors) {
+			for (i = 0; i < ARRAY_SIZE(survivors); ++i) {
+				survivors[i] = amdgpu_gem_va_batch_boundary(&fpriv->vm,
+									    &replace, i);
+				if (!survivors[i] || !survivors[i]->base.bo)
+					continue;
+				r = drm_exec_lock_obj(&exec, &survivors[i]->base.bo->tbo.base);
+				drm_exec_retry_on_contention(&exec);
+				if (unlikely(r))
+					goto error;
+			}
+		}
 	}
 
 	/* Resolve the BO-VA mapping for this VM/BO combination. */
@@ -1004,7 +1067,7 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 		struct dma_fence *fence;
 
 		fence = amdgpu_gem_va_update_vm(adev, &fpriv->vm, bo_va,
-						args->operation);
+						args->operation, survivors);
 		if (timeline_syncobj) {
 			if (!args->vm_timeline_point) {
 				/* Replace the existing fence when no point is given. */
