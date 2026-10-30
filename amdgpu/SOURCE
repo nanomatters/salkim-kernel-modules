@@ -266,3 +266,5 @@ b284f8caa5ca2954340c8a7435001099237ae171 drm/amdgpu: Enable HDMI audio only for 
 95bc87325b9f58850137b7476d6c00f8474a9552 drm/amdgpu: Use the default DMA fence release.
 
 178d00b16ddbb5962adbbe2c486204b0b6a4b9f0 drm/amdgpu/vce: Provide feedback storage for session destruction.
+
+ea5f7bfe28d331f62f20a68a0ac78ab820bc6deb drm/amd/display: Refresh DCN32 memory-clock watermarks.
