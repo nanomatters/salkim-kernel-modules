@@ -65,9 +65,12 @@ struct list_head { void *next, *prev; };
 struct dma_fence_ops { int unused; };
 struct dma_fence {
     const struct dma_fence_ops *ops;
-    u64 seqno;
+    u64 seqno, context;
     unsigned refs, waited;
-    int error;
+    int error, wait_error, completion_error;
+    bool signaled;
+    struct dma_fence *children[3];
+    unsigned child_count;
 };
 #define TASK_COMM_LEN 16
 ACTUAL_STRUCTURES
@@ -78,7 +81,7 @@ struct drm_file { u64 client_id; struct amdgpu_fpriv *driver_priv; };
 struct drm_device { void *dev; };
 struct dma_resv { struct dma_fence *fences[8]; unsigned count; };
 struct dma_resv_iter { unsigned index; struct dma_resv *resv; };
-struct dma_fence_unwrap { struct dma_fence *next; };
+struct dma_fence_unwrap { struct dma_fence *chain; unsigned index; };
 struct drm_gem_object { struct dma_resv *resv; };
 struct drm_exec { int unused; };
 struct xarray { struct amdgpu_userq_fence_driver *entries[8]; unsigned count; };
@@ -107,7 +110,7 @@ static u64 seq64_word;
     for ((it)->resv = (r), (it)->index = 0; \
          (it)->index < (it)->resv->count && ((f) = (it)->resv->fences[(it)->index]); (it)->index++)
 #define dma_fence_unwrap_for_each(f, it, root) \
-    for ((it)->next = (root); ((f) = (it)->next); (it)->next = NULL)
+    for ((f) = unwrap_first((root), (it)); (f); (f) = unwrap_next(it))
 #define trace_amdgpu_userq_wait_deps(dev, q, f) ((void)0)
 #define xa_limit_32b 0
 #define u64_to_user_ptr(p) ((void *)(uintptr_t)(p))
@@ -119,8 +122,34 @@ static void *kmalloc_array(size_t count, size_t size, int flags)
 { void *p = calloc(count ? count : 1, size); assert(p); return p; }
 static struct dma_fence *dma_fence_get(struct dma_fence *f) { assert(f->refs); f->refs++; return f; }
 static void dma_fence_put(struct dma_fence *f) { assert(f->refs > 1); f->refs--; }
+static int dma_fence_get_status(struct dma_fence *f)
+{ return f->signaled ? (f->error ? f->error : 1) : 0; }
 static int dma_fence_wait(struct dma_fence *f, bool interruptible)
-{ assert(interruptible); f->waited++; return f->error; }
+{
+    assert(interruptible);
+    f->waited++;
+    if (f->wait_error)
+        return f->wait_error;
+    if (f->completion_error)
+        f->error = f->completion_error;
+    f->signaled = true;
+    return 0;
+}
+static struct dma_fence *unwrap_first(struct dma_fence *f, struct dma_fence_unwrap *it)
+{
+    it->chain = dma_fence_get(f);
+    it->index = 0;
+    return f->child_count ? f->children[0] : f;
+}
+static struct dma_fence *unwrap_next(struct dma_fence_unwrap *it)
+{
+    struct dma_fence *f = it->chain;
+    if (++it->index < f->child_count)
+        return f->children[it->index];
+    dma_fence_put(f);
+    it->chain = NULL;
+    return NULL;
+}
 static int drm_syncobj_find_fence(struct drm_file *file, u32 handle, u64 point,
                                  u64 flags, struct dma_fence **f)
 {
@@ -140,9 +169,15 @@ static unsigned dma_fence_dedup_array(struct dma_fence **fences, unsigned count)
     unsigned n = 0;
     for (unsigned i = 0; i < count; i++) {
         unsigned j;
-        for (j = 0; j < n && fences[j] != fences[i]; j++);
-        if (j == n) fences[n++] = fences[i];
-        else dma_fence_put(fences[i]);
+        for (j = 0; j < n && fences[j]->context != fences[i]->context; j++);
+        if (j == n) {
+            fences[n++] = fences[i];
+        } else if (fences[j]->seqno < fences[i]->seqno) {
+            dma_fence_put(fences[j]);
+            fences[j] = fences[i];
+        } else {
+            dma_fence_put(fences[i]);
+        }
     }
     return n;
 }
@@ -185,6 +220,7 @@ static void check_wait(struct drm_file *file, struct dma_fence *f, unsigned tran
     assert(wait.num_fences == expected_count && !locked && f->refs == 1);
     wait.num_fences = capacity;
     f->waited = 0;
+    bool was_signaled = f->signaled;
     assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, &handle, &point,
                                                &handle, bos, bos) == expected_error);
     assert(f->waited == expected_cpu && f->refs == 1 && !locked && !queue.refs);
@@ -202,7 +238,119 @@ static void check_wait(struct drm_file *file, struct dma_fence *f, unsigned tran
         drv->refcount.refs--;
     }
     queue.fence_drv_xa.count = 0;
+    f->signaled = was_signaled;
     cases++;
+}
+
+static void check_failed_dependencies(struct drm_file *file)
+{
+    for (unsigned transport = 1; transport <= 2; transport++) {
+        for (unsigned capacity = 0; capacity <= 2; capacity++) {
+            for (unsigned completed = 0; completed < 2; completed++) {
+                struct dma_fence dependency = {
+                    .ops = &kernel_ops, .refs = 1, .context = 123,
+                    .signaled = completed, .error = completed ? -EIO : 0,
+                    .completion_error = completed ? 0 : -EIO,
+                };
+                u32 handle = transport == 2;
+                u64 point = UINT64_C(0x100000001);
+                struct drm_device dev = {0};
+                struct drm_amdgpu_userq_fence_info out[2] = {{0}};
+                struct drm_amdgpu_userq_wait wait = {
+                    .waitq_id = 7, .num_fences = capacity,
+                    .num_syncobj_handles = transport == 1,
+                    .num_syncobj_timeline_handles = transport == 2,
+                    .out_fences = (uintptr_t)out,
+                };
+                syncobjs[handle] = &dependency;
+                assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, &handle,
+                           &point, &handle, NULL, NULL) == -EIO);
+                assert(dependency.refs == 1 && dependency.waited == !completed);
+                assert(!locked && !queue.refs && !queue.fence_drv_xa.count);
+                cases++;
+            }
+        }
+    }
+
+    /* An earlier failed VM update must survive deduplication against its successor. */
+    for (unsigned capacity = 1; capacity <= 3; capacity++) {
+        for (unsigned completed = 0; completed < 2; completed++) {
+            struct dma_fence first = {
+                .ops = &kernel_ops, .refs = 1, .context = 123, .seqno = 1,
+                .signaled = completed, .error = completed ? -ENOMEM : 0,
+                .completion_error = completed ? 0 : -ENOMEM,
+            };
+            struct dma_fence second = {
+                .ops = &kernel_ops, .refs = 1, .context = 123, .seqno = 2,
+            };
+            struct dma_fence third = {
+                .ops = &kernel_ops, .refs = 1, .context = 124, .seqno = 1,
+            };
+            struct dma_fence container = {
+                .ops = &wrapper_ops, .refs = 1,
+                .children = {&second, &first, &third}, .child_count = 3,
+            };
+            struct drm_device dev = {0};
+            struct drm_amdgpu_userq_fence_info out[3] = {{0}};
+            struct drm_amdgpu_userq_wait wait = {
+                .waitq_id = 7, .num_fences = capacity,
+                .num_syncobj_timeline_handles = 1, .out_fences = (uintptr_t)out,
+            };
+            u32 handle = 1;
+            u64 point = UINT64_C(0x100000001);
+            syncobjs[handle] = &container;
+            assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, NULL,
+                       &point, &handle, NULL, NULL) == -ENOMEM);
+            assert(container.refs == 1 && first.refs == 1 && second.refs == 1 && third.refs == 1);
+            assert(!locked && !queue.refs && !queue.fence_drv_xa.count);
+            cases++;
+        }
+    }
+}
+
+static void check_mixed_dependencies(struct drm_file *file,
+                                     struct amdgpu_userq_fence_driver *driver)
+{
+    for (unsigned transport = 1; transport <= 2; transport++) {
+        for (unsigned capacity = 1; capacity <= 2; capacity++) {
+            for (unsigned write = 0; write < 2; write++) {
+                struct amdgpu_userq_fence explicit = {
+                    .base = {.ops = &amdgpu_userq_fence_ops, .refs = 1,
+                             .context = 50, .seqno = 1, .signaled = true},
+                    .fence_drv = driver,
+                };
+                struct amdgpu_userq_fence implicit = {
+                    .base = {.ops = &amdgpu_userq_fence_ops, .refs = 1,
+                             .context = 50, .seqno = 2, .signaled = true, .error = -EIO},
+                    .fence_drv = driver,
+                };
+                struct dma_resv resv = {.fences = {&implicit.base}, .count = 1};
+                struct drm_gem_object bo = {.resv = &resv}, *bos[] = {&bo};
+                struct drm_device dev = {0};
+                struct drm_amdgpu_userq_fence_info out[2] = {{0}};
+                struct drm_amdgpu_userq_wait wait = {
+                    .waitq_id = 7, .num_fences = capacity,
+                    .num_syncobj_handles = transport == 1,
+                    .num_syncobj_timeline_handles = transport == 2,
+                    .num_bo_read_handles = !write, .num_bo_write_handles = write,
+                    .out_fences = (uintptr_t)out,
+                };
+                u32 handle = transport == 2;
+                u64 point = UINT64_C(0x100000001);
+                syncobjs[handle] = &explicit.base;
+                assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, &handle,
+                           &point, &handle, bos, bos) == 0);
+                assert(explicit.base.refs == 1 && implicit.base.refs == 1);
+                assert(!explicit.base.waited && implicit.base.waited == (capacity == 1));
+                assert(!locked && !queue.refs && queue.fence_drv_xa.count == 1);
+                assert(wait.num_fences == 1 && out[0].value == (capacity == 1 ? 1 : 2));
+                assert(driver->refcount.refs == 2);
+                driver->refcount.refs--;
+                queue.fence_drv_xa.count = 0;
+                cases++;
+            }
+        }
+    }
 }
 
 int main(void)
@@ -216,37 +364,66 @@ int main(void)
     assert(own->client_id == file.client_id && other->client_id != file.client_id);
     assert(own->adev == &dev && own->context != other->context);
     struct amdgpu_userq_fence local = {
-        .base = {.ops = &amdgpu_userq_fence_ops, .seqno = 11, .refs = 1}, .fence_drv = own,
+        .base = {.ops = &amdgpu_userq_fence_ops, .seqno = 11, .context = 1, .refs = 1}, .fence_drv = own,
     };
     struct amdgpu_userq_fence foreign = {
-        .base = {.ops = &amdgpu_userq_fence_ops, .seqno = 22, .refs = 1}, .fence_drv = other,
+        .base = {.ops = &amdgpu_userq_fence_ops, .seqno = 22, .context = 2, .refs = 1}, .fence_drv = other,
     };
-    struct dma_fence kernel = {.ops = &kernel_ops, .refs = 1};
-    struct dma_fence wrapped = {.ops = &wrapper_ops, .refs = 1};
+    struct dma_fence kernel = {.ops = &kernel_ops, .context = 3, .refs = 1};
+    struct dma_fence wrapped = {.ops = &wrapper_ops, .context = 4, .refs = 1};
 
     for (unsigned write = 0; write < 2; write++) {
         /* Both BO lists skip local UserQ fences, including when there is no output space. */
         check_wait(&file, &local.base, 0, write, 8, 0, 0, 0, 0);
-        local.base.error = -EINTR;
+        local.base.wait_error = -EINTR;
         check_wait(&file, &local.base, 0, write, 0, 0, 0, 0, 0);
-        local.base.error = 0;
+        local.base.wait_error = 0;
         /* Explicit binary and timeline waits survive even with the same fence on a BO. */
         for (unsigned transport = 1; transport <= 2; transport++) {
             check_wait(&file, &local.base, transport, write, 8, 1, 1, 0, 0);
             check_wait(&file, &local.base, transport, write, 0, 1, 0, 1, 0);
-            local.base.error = -EINTR;
+            local.base.wait_error = -EINTR;
             check_wait(&file, &local.base, transport, write, 0, 1, 0, 1, -EINTR);
-            local.base.error = 0;
+            local.base.wait_error = 0;
         }
         /* Other DRM clients still synchronize, even when the low 32 bits of the ID match. */
         check_wait(&file, &foreign.base, 0, write, 8, 1, 1, 0, 0);
         check_wait(&file, &foreign.base, 0, write, 0, 1, 0, 1, 0);
-        foreign.base.error = -EINTR;
+        foreign.base.wait_error = -EINTR;
         check_wait(&file, &foreign.base, 0, write, 0, 1, 0, 1, -EINTR);
-        foreign.base.error = 0;
+        foreign.base.wait_error = 0;
         /* Kernel maintenance and unrecognized compound fences are retained conservatively. */
         check_wait(&file, &kernel, 0, write, 8, 1, 0, 1, 0);
         check_wait(&file, &wrapped, 0, write, 8, 1, 0, 1, 0);
+        /* A failed foreign BO fence remains a dependency, not this client's error. */
+        for (unsigned capacity = 0; capacity <= 8; capacity += 8) {
+            kernel.error = -EIO;
+            kernel.signaled = true;
+            check_wait(&file, &kernel, 0, write, capacity, 1, 0, 1, 0);
+            kernel.error = 0;
+            kernel.signaled = false;
+            kernel.completion_error = -ENOMEM;
+            check_wait(&file, &kernel, 0, write, capacity, 1, 0, 1, 0);
+            kernel.completion_error = kernel.error = 0;
+            foreign.base.error = -EIO;
+            foreign.base.signaled = true;
+            check_wait(&file, &foreign.base, 0, write, capacity, 1, !!capacity, !capacity, 0);
+            foreign.base.error = 0;
+            foreign.base.signaled = false;
+        }
+        /* The same BO fence is an error when the caller explicitly waits on it. */
+        for (unsigned transport = 1; transport <= 2; transport++) {
+            kernel.error = -EIO;
+            kernel.signaled = true;
+            check_wait(&file, &kernel, transport, write, 8, 2, 0, 0, -EIO);
+            kernel.error = 0;
+            kernel.signaled = false;
+            foreign.base.error = -ENOMEM;
+            foreign.base.signaled = true;
+            check_wait(&file, &foreign.base, transport, write, 8, 2, 0, 0, -ENOMEM);
+            foreign.base.error = 0;
+            foreign.base.signaled = false;
+        }
     }
     /* A skipped local fence must not consume the only slot needed by a foreign fence. */
     for (unsigned write = 0; write < 2; write++) {
@@ -272,13 +449,15 @@ int main(void)
         queue.fence_drv_xa.count = 0;
         cases++;
     }
+    check_failed_dependencies(&file);
+    check_mixed_dependencies(&file, other);
     /* An exported fence keeps its original identity after the DRM file is replaced. */
     file.client_id = UINT64_C(0x300000007);
     check_wait(&file, &local.base, 0, false, 8, 1, 1, 0, 0);
     assert(own->refcount.refs == 1 && other->refcount.refs == 1);
     free(own);
     free(other);
-    printf("UserQ fence ownership: %u cases passed\n", cases);
+    printf("UserQ fence ownership and completion: %u cases passed\n", cases);
     return 0;
 }
 '''
