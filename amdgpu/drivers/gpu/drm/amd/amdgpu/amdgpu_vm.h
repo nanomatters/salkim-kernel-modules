@@ -358,6 +358,13 @@ struct amdgpu_mem_stats {
 	uint64_t evicted;
 };
 
+struct amdgpu_vm_batch_state;
+
+struct amdgpu_vm_batch_entry {
+	struct list_head node;
+	struct dma_fence *fence;
+};
+
 struct amdgpu_vm {
 	/* tree of virtual addresses mapped */
 	struct rb_root_cached	va;
@@ -402,6 +409,7 @@ struct amdgpu_vm {
 	/* contains the page directory */
 	struct amdgpu_vm_bo_base     root;
 	struct dma_fence	*last_update;
+	struct amdgpu_vm_batch_state *batch_state;
 
 	/* Scheduler entities for page table updates */
 	struct drm_sched_entity	immediate;
@@ -513,6 +521,13 @@ int amdgpu_vm_lock_pd(struct amdgpu_vm *vm, struct drm_exec *exec,
 int amdgpu_vm_lock_individual(struct amdgpu_vm *vm, struct drm_exec *exec,
 			      unsigned int num_fences);
 bool amdgpu_vm_ready(struct amdgpu_vm *vm);
+int amdgpu_vm_batch_prepare(struct amdgpu_vm *vm);
+int amdgpu_vm_batch_status(struct amdgpu_vm *vm);
+void amdgpu_vm_batch_error(struct amdgpu_vm *vm);
+void amdgpu_vm_batch_track(struct amdgpu_vm *vm,
+			   struct amdgpu_vm_batch_entry *entry,
+			   struct dma_fence *fence);
+
 uint64_t amdgpu_vm_generation(struct amdgpu_device *adev, struct amdgpu_vm *vm);
 int amdgpu_vm_validate(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 		       struct ww_acquire_ctx *ticket,

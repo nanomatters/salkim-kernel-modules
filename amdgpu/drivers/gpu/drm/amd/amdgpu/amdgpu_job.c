@@ -440,6 +440,13 @@ static struct dma_fence *amdgpu_job_run(struct drm_sched_job *sched_job)
 	    (job->job_run_counter && job->gang_submit))
 		dma_fence_set_error(finished, -ECANCELED);
 
+	if (job->vm && finished->error >= 0) {
+		int status = amdgpu_vm_batch_status(job->vm);
+
+		if (status < 0)
+			dma_fence_set_error(finished, status);
+	}
+
 	if (finished->error < 0) {
 		dev_dbg(adev->dev, "Skip scheduling IBs in ring(%s)",
 			ring->name);

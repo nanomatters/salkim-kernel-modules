@@ -1002,6 +1002,7 @@ int amdgpu_userq_wait_ioctl(struct drm_device *dev, void *data,
 	u32 *syncobj_handles, *timeline_handles;
 	u64 *timeline_points;
 	struct drm_amdgpu_userq_wait *wait_info = data;
+	struct amdgpu_fpriv *fpriv = filp->driver_priv;
 	struct drm_gem_object **gobj_write;
 	struct drm_gem_object **gobj_read;
 	void __user *ptr;
@@ -1009,6 +1010,9 @@ int amdgpu_userq_wait_ioctl(struct drm_device *dev, void *data,
 
 	if (!amdgpu_userq_enabled(dev))
 		return -ENOTSUPP;
+	r = amdgpu_vm_batch_status(&fpriv->vm);
+	if (r)
+		return r;
 
 	if (wait_info->num_bo_write_handles > AMDGPU_USERQ_MAX_HANDLES ||
 	    wait_info->num_bo_read_handles > AMDGPU_USERQ_MAX_HANDLES)
@@ -1069,6 +1073,9 @@ int amdgpu_userq_wait_ioctl(struct drm_device *dev, void *data,
 							gobj_write,
 							gobj_read);
 	}
+
+	if (!r)
+		r = amdgpu_vm_batch_status(&fpriv->vm);
 
 	while (num_write_bo_handles--)
 		drm_gem_object_put(gobj_write[num_write_bo_handles]);

@@ -28,6 +28,7 @@
  */
 
 #include <linux/dma-fence-array.h>
+#include <linux/dma-fence-unwrap.h>
 #include <linux/interval_tree_generic.h>
 #include <linux/idr.h>
 #include <linux/dma-buf.h>
@@ -2842,6 +2843,114 @@ void amdgpu_vm_set_task_info(struct amdgpu_vm *vm)
 	get_task_comm(vm->task_info->process_name, current->group_leader);
 }
 
+/* Keep completion references independently of garbage-collected syncobj points. */
+struct amdgpu_vm_batch_state {
+	/* Protects pending completion references and the terminal error. */
+	struct mutex lock;
+	struct list_head pending;
+	int error;
+};
+
+static struct amdgpu_vm_batch_state *amdgpu_vm_batch_state_get(struct amdgpu_vm *vm)
+{
+	/* Pairs with batch_prepare() so readers see the initialized mutex and list. */
+	return smp_load_acquire(&vm->batch_state);
+}
+
+static void amdgpu_vm_batch_clear(struct amdgpu_vm_batch_state *state)
+{
+	struct amdgpu_vm_batch_entry *entry, *tmp;
+
+	list_for_each_entry_safe(entry, tmp, &state->pending, node) {
+		list_del(&entry->node);
+		dma_fence_put(entry->fence);
+		kfree(entry);
+	}
+}
+
+int amdgpu_vm_batch_status(struct amdgpu_vm *vm)
+{
+	struct amdgpu_vm_batch_state *state = amdgpu_vm_batch_state_get(vm);
+	struct amdgpu_vm_batch_entry *entry, *tmp;
+	int status;
+
+	if (!state)
+		return 0;
+	mutex_lock(&state->lock);
+	list_for_each_entry_safe(entry, tmp, &state->pending, node) {
+		struct dma_fence_unwrap iter;
+		struct dma_fence *fence;
+
+		status = dma_fence_get_status(entry->fence);
+		if (status < 0)
+			state->error = -EIO;
+		/* Already-completed arrays can omit errors from their children. */
+		dma_fence_unwrap_for_each(fence, &iter, entry->fence)
+			if (dma_fence_get_status(fence) < 0)
+				state->error = -EIO;
+		if (status) {
+			list_del(&entry->node);
+			dma_fence_put(entry->fence);
+			kfree(entry);
+		}
+	}
+	if (state->error)
+		amdgpu_vm_batch_clear(state);
+	status = state->error;
+	mutex_unlock(&state->lock);
+	return status;
+}
+
+int amdgpu_vm_batch_prepare(struct amdgpu_vm *vm)
+{
+	struct amdgpu_vm_batch_state *state;
+
+	dma_resv_assert_held(vm->root.bo->tbo.base.resv);
+	if (!vm->batch_state) {
+		state = kzalloc_obj(*state);
+		if (!state)
+			return -ENOMEM;
+		mutex_init(&state->lock);
+		INIT_LIST_HEAD(&state->pending);
+		/* Publish initialized state to readers outside the PD reservation. */
+		smp_store_release(&vm->batch_state, state);
+	}
+	return amdgpu_vm_batch_status(vm);
+}
+
+void amdgpu_vm_batch_error(struct amdgpu_vm *vm)
+{
+	struct amdgpu_vm_batch_state *state = amdgpu_vm_batch_state_get(vm);
+
+	mutex_lock(&state->lock);
+	state->error = -EIO;
+	amdgpu_vm_batch_clear(state);
+	mutex_unlock(&state->lock);
+}
+
+void amdgpu_vm_batch_track(struct amdgpu_vm *vm,
+			   struct amdgpu_vm_batch_entry *entry,
+			   struct dma_fence *fence)
+{
+	struct amdgpu_vm_batch_state *state = amdgpu_vm_batch_state_get(vm);
+
+	entry->fence = dma_fence_get(fence);
+	mutex_lock(&state->lock);
+	list_add_tail(&entry->node, &state->pending);
+	mutex_unlock(&state->lock);
+}
+
+static void amdgpu_vm_batch_fini(struct amdgpu_vm *vm)
+{
+	struct amdgpu_vm_batch_state *state = vm->batch_state;
+
+	if (!state)
+		return;
+	amdgpu_vm_batch_clear(state);
+	mutex_destroy(&state->lock);
+	kfree(state);
+}
+
 /**
  * amdgpu_vm_init - initialize a vm instance
  *
@@ -2862,6 +2971,7 @@ int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm,
 	int r, i;
 
 	vm->va = RB_ROOT_CACHED;
+	vm->batch_state = NULL;
 	for (i = 0; i < AMDGPU_MAX_VMHUBS; i++)
 		vm->reserved_vmid[i] = NULL;
 
@@ -3039,6 +3149,7 @@ void amdgpu_vm_fini(struct amdgpu_device *adev, struct amdgpu_vm *vm)
 	int i;
 
 	amdgpu_amdkfd_gpuvm_destroy_cb(adev, vm);
+	amdgpu_vm_batch_fini(vm);
 
 	root = amdgpu_bo_ref(vm->root.bo);
 	amdgpu_bo_reserve(root, true);
