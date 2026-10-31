@@ -2351,15 +2351,22 @@ int amdgpu_gfx_reset_mes_compute(struct amdgpu_device *adev,
 	struct mes_remove_queue_input *queue_input = (struct mes_remove_queue_input *)faulty_queue_input;
 	struct amdgpu_gfx_deferred_entry deferred_end[AMDGPU_MAX_COMPUTE_RINGS + 1];
 	int n_deferred = 0;
-	int ring_err;
+	int ring_err, resume_err;
+	bool suspended;
 
 	guard(mutex)(&adev->gfx.mec.reset_mutex);
+	if (uq) {
+		guard(mutex)(&uq->state_mutex);
+		if (uq->state == AMDGPU_USERQ_STATE_CANCELED)
+			return 0;
+	}
 	/* stop the drm schedulers for all compute queues */
 	amdgpu_gfx_reset_stop_compute_scheds(adev, ring);
 	/* suspend all will determine which queues are hung.
 	 * reset detect will return the array of bad queue doorbells
 	 */
 	r = amdgpu_mes_suspend(adev, 0);
+	suspended = !r && amdgpu_mes_suspend_resume_all_supported(adev);
 	/* if suspend all success, it should no hang queue */
 	if (!r)
 		/* always reset the KCQ/userq since we need to signal the fence
@@ -2385,7 +2392,8 @@ fence_reset:
 		n_deferred++;
 	}
 	if (uq) {
-		r = mes_userq_reset(uq);
+		/* A suspended queue only needs removal before other gangs resume. */
+		r = suspended ? mes_userq_cancel(uq) : mes_userq_reset(uq);
 		if (r)
 			goto out;
 	}
@@ -2440,7 +2448,9 @@ fence_reset:
 
 out:
 	/* resume all will enable the non-hung queues */
-	amdgpu_mes_resume(adev, 0);
+	resume_err = amdgpu_mes_resume(adev, 0);
+	if (resume_err)
+		return r ? r : resume_err;
 
 	/* Now CP is running again — replay backed-up commands and ring
 	 * doorbells on each reset queue.
