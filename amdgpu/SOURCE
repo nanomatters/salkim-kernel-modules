@@ -242,3 +242,5 @@ ebacf0a7ce54cba4603345cfa50268242c4989a3 drm/amd/display: Signal PQ in DP FreeSy
 c90d7695bde6a6232b207a06b6a3cb3f821b209a drm/amdgpu: Guard unsupported SPI ROM dumps.
 
 b93c05bbc84e17117954f7d44465796431e16ea7 drm/amd/display: Guard unsupported DMUB trace controls.
+
+86529d7b448ca04cc7ae4626f8cabef04f3b8f3d drm/amdgpu: Bound firmware backlight curve points.
