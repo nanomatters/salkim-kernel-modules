@@ -47,7 +47,25 @@ static inline struct amdgpu_userq_fence *to_amdgpu_userq_fence(struct dma_fence 
 
 static u64 amdgpu_userq_fence_read(struct amdgpu_userq_fence_driver *fence_drv)
 {
-	return le64_to_cpu(*fence_drv->cpu_addr);
+	return le64_to_cpu(READ_ONCE(*fence_drv->cpu_addr));
+}
+
+bool amdgpu_userq_fence_has_pending(struct amdgpu_usermode_queue *queue,
+				    u64 *progress)
+{
+	struct amdgpu_userq_fence_driver *drv = queue->fence_drv;
+	struct amdgpu_userq_fence *fence;
+	unsigned long flags;
+	bool pending = false;
+
+	spin_lock_irqsave(&drv->fence_list_lock, flags);
+	*progress = amdgpu_userq_fence_read(drv);
+	if (!list_empty(&drv->fences)) {
+		fence = list_last_entry(&drv->fences, struct amdgpu_userq_fence, link);
+		pending = *progress < fence->base.seqno;
+	}
+	spin_unlock_irqrestore(&drv->fence_list_lock, flags);
+	return pending;
 }
 
 static void
@@ -554,18 +572,32 @@ int amdgpu_userq_signal_ioctl(struct drm_device *dev, void *data,
 	if (r)
 		goto put_queue;
 
-	r = amdgpu_userq_fence_alloc(queue, &fence);
-	if (r)
-		goto put_queue;
-
-	/* We are here means UQ is active, make sure the eviction fence is valid */
+	/* Keep queue cancellation and fence creation serialized. */
 	amdgpu_userq_ensure_ev_fence(&fpriv->userq_mgr, &fpriv->evf_mgr);
+	mutex_lock(&queue->state_mutex);
+	if (READ_ONCE(queue->hang_detect_stopped) ||
+	    queue->state == AMDGPU_USERQ_STATE_HUNG ||
+	    queue->state == AMDGPU_USERQ_STATE_INVALID_VA ||
+	    queue->state == AMDGPU_USERQ_STATE_CANCELED) {
+		mutex_unlock(&queue->state_mutex);
+		mutex_unlock(&userq_mgr->userq_mutex);
+		r = -ECANCELED;
+		goto put_queue;
+	}
+
+	r = amdgpu_userq_fence_alloc(queue, &fence);
+	if (r) {
+		mutex_unlock(&queue->state_mutex);
+		mutex_unlock(&userq_mgr->userq_mutex);
+		goto put_queue;
+	}
 
 	/* Create the new fence */
 	amdgpu_userq_fence_init(queue, fence, wptr);
 
 	trace_amdgpu_userq_emit_fence(dev->dev, queue, fence);
 
+	mutex_unlock(&queue->state_mutex);
 	mutex_unlock(&userq_mgr->userq_mutex);
 
 	/*
