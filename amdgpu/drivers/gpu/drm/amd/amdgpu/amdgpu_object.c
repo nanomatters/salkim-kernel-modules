@@ -1324,6 +1324,7 @@ void amdgpu_bo_release_notify(struct ttm_buffer_object *bo)
 		return;
 
 	amdgpu_amdkfd_remove_all_eviction_fences(abo);
+	amdgpu_eviction_fence_remove_all(abo);
 
 	if (!bo->resource || bo->resource->mem_type != TTM_PL_VRAM ||
 	    !(abo->flags & AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE) ||

@@ -64,6 +64,7 @@ int amdgpu_evf_mgr_rearm(struct amdgpu_eviction_fence_mgr *evf_mgr,
 			 struct drm_exec *exec);
 void amdgpu_evf_mgr_detach_fence(struct amdgpu_eviction_fence_mgr *evf_mgr,
 				 struct amdgpu_bo *bo);
+void amdgpu_eviction_fence_remove_all(struct amdgpu_bo *bo);
 void amdgpu_evf_mgr_init(struct amdgpu_eviction_fence_mgr *evf_mgr);
 void amdgpu_evf_mgr_shutdown(struct amdgpu_eviction_fence_mgr *evf_mgr);
 void amdgpu_evf_mgr_flush_suspend(struct amdgpu_eviction_fence_mgr *evf_mgr);
