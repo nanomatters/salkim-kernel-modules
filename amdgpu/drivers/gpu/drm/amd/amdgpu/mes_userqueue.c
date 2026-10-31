@@ -133,9 +133,9 @@ static int mes_userq_map(struct amdgpu_usermode_queue *queue)
 	queue_input.process_va_start = 0;
 	queue_input.process_va_end = adev->vm_manager.max_pfn - 1;
 
-	/* set process quantum to 10 ms and gang quantum to 1 ms as default */
+	/* Set the process quantum to 10 ms and the gang quantum to 1.25 ms. */
 	queue_input.process_quantum = 100000;
-	queue_input.gang_quantum = 10000;
+	queue_input.gang_quantum = 12500;
 	queue_input.paging = false;
 
 	queue_input.process_context_addr = uq_mgr->proc_ctx_obj.gpu_addr;
