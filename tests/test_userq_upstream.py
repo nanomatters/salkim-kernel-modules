@@ -44,6 +44,12 @@ class UserqUpstreamTests(unittest.TestCase):
             subprocess.run(flags + [str(program), '-o', str(binary)], check=True, timeout=30)
             subprocess.run([str(binary)], check=True, timeout=30)
 
+    def test_userq_slot_availability(self):
+        body = self.function('amdgpu_kms.c', 'amdgpu_hw_ip_info')
+        cases = body[body.index('\tcase AMDGPU_HW_IP_GFX:'):body.index('\tcase AMDGPU_HW_IP_UVD:')]
+        self.run_program(SLOT_HARNESS.replace('ACTUAL_IP_CASES', cases))
+
+
     def test_destroy_watchdog(self):
         body = self.function('amdgpu_userq.c', 'amdgpu_userq_stop_hang_detect_work')
         body += '\n' + self.function('amdgpu_userq.c', 'amdgpu_userq_destroy')
@@ -61,6 +67,72 @@ class UserqUpstreamTests(unittest.TestCase):
                           self.source('amdgpu_kms.c'), re.M | re.S)
         self.assertIsNotNone(match)
         self.run_program(FIRMWARE_HARNESS.replace('ACTUAL_CASE', match.group(1)))
+
+
+SLOT_HARNESS = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#define AMDGPU_MES_MAX_GFX_PIPES 2
+#define AMDGPU_MES_MAX_COMPUTE_PIPES 2
+#define AMDGPU_MES_MAX_SDMA_PIPES 2
+#define hweight32(value) __builtin_popcount(value)
+enum { AMDGPU_HW_IP_GFX, AMDGPU_HW_IP_COMPUTE, AMDGPU_HW_IP_DMA };
+enum { AMD_IP_BLOCK_TYPE_GFX, AMD_IP_BLOCK_TYPE_SDMA };
+struct ring { struct { bool ready; } sched; bool no_user_submission; };
+struct amdgpu_device {
+    struct { bool disable_uq; unsigned int num_gfx_rings, num_compute_rings;
+             struct ring gfx_ring[2], compute_ring[4]; } gfx;
+    struct { bool disable_uq; unsigned int num_instances;
+             struct { struct ring ring; } instance[2]; } sdma;
+    struct { unsigned int gfx_hqd_mask[2], compute_hqd_mask[2], sdma_hqd_mask[2]; } mes;
+};
+static unsigned int query_slots(struct amdgpu_device *adev, unsigned int ip)
+{
+    unsigned int type = 0, num_rings = 0, num_slots = 0, i;
+    unsigned int ib_start_alignment = 0, ib_size_alignment = 0;
+    switch (ip) {
+ACTUAL_IP_CASES
+    default: assert(false);
+    }
+    assert(num_rings == (ip == AMDGPU_HW_IP_COMPUTE ? 4u : 2u));
+    assert(type == (ip == AMDGPU_HW_IP_DMA ? AMD_IP_BLOCK_TYPE_SDMA : AMD_IP_BLOCK_TYPE_GFX));
+    assert(ib_start_alignment == (ip == AMDGPU_HW_IP_DMA ? 256u : 32u));
+    assert(ib_size_alignment == (ip == AMDGPU_HW_IP_DMA ? 4u : 32u));
+    return num_slots;
+}
+int main(void)
+{
+    struct amdgpu_device adev = {0};
+    unsigned int i, flags;
+    adev.gfx.num_gfx_rings = adev.sdma.num_instances = 2;
+    adev.gfx.num_compute_rings = 4;
+    for (i = 0; i < 4; i++) adev.gfx.compute_ring[i].sched.ready = true;
+    for (i = 0; i < 2; i++) {
+        adev.gfx.gfx_ring[i].sched.ready = true;
+        adev.sdma.instance[i].ring.sched.ready = true;
+    }
+    adev.mes.gfx_hqd_mask[0] = 0x86;
+    adev.mes.gfx_hqd_mask[1] = 0x10;
+    adev.mes.compute_hqd_mask[0] = 0xf;
+    adev.mes.compute_hqd_mask[1] = 0x30;
+    adev.mes.sdma_hqd_mask[0] = 0x5;
+    adev.mes.sdma_hqd_mask[1] = 0x40;
+    for (flags = 0; flags < 4; flags++) {
+        adev.gfx.disable_uq = flags & 1;
+        adev.sdma.disable_uq = flags & 2;
+        assert(query_slots(&adev, AMDGPU_HW_IP_GFX) == (adev.gfx.disable_uq ? 0u : 4u));
+        assert(query_slots(&adev, AMDGPU_HW_IP_COMPUTE) == (adev.gfx.disable_uq ? 0u : 6u));
+        assert(query_slots(&adev, AMDGPU_HW_IP_DMA) == (adev.sdma.disable_uq ? 0u : 3u));
+    }
+    memset(&adev.mes, 0, sizeof(adev.mes));
+    adev.gfx.disable_uq = adev.sdma.disable_uq = false;
+    for (i = 0; i < 3; i++) assert(query_slots(&adev, i) == 0);
+    puts("UserQ slot availability tests passed.");
+    return 0;
+}
+'''
 
 
 DESTROY_HARNESS = r'''
