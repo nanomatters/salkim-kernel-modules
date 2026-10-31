@@ -111,7 +111,7 @@ struct amdgpu_fpriv { struct amdgpu_userq_mgr userq_mgr; int evf_mgr; };
 struct drm_file { struct amdgpu_fpriv *driver_priv; };
 struct drm_gem_object { void *resv; };
 struct drm_exec { int unused; };
-struct dma_fence { unsigned refs; };
+struct dma_fence { unsigned refs; int status; };
 struct dma_fence_chain { int unused; };
 struct amdgpu_userq_fence { struct dma_fence base; };
 struct drm_syncobj { unsigned refs; };
@@ -119,12 +119,14 @@ struct amdgpu_usermode_queue {
     unsigned refs, state;
     int state_mutex;
     bool hang_detect_stopped;
+    struct dma_fence *last_fence;
 };
 
 enum failure {
     NONE, DISABLED, READ_LOOKUP, WRITE_LOOKUP, QUEUE_LOOKUP,
     WPTR_READ, FENCE_ALLOC, READ_PREPARE, WRITE_PREPARE,
     QUEUE_HUNG, QUEUE_CANCELED, QUEUE_INVALID_VA, QUEUE_STOPPED,
+    LAST_PENDING, LAST_SUCCESS, LAST_CANCELED, LAST_ERROR,
 };
 static enum failure failure;
 static unsigned alloc_count, fail_alloc, live_allocs, published, chains_owned;
@@ -137,6 +139,8 @@ static struct dma_fence_chain *owned_chains[4];
 static u64 signalled_points[4];
 static struct amdgpu_usermode_queue queue;
 static struct amdgpu_userq_fence fence;
+static struct dma_fence previous_fence;
+static unsigned status_checks;
 static struct amdgpu_device device;
 
 static void *allocate(size_t size)
@@ -249,6 +253,12 @@ static int amdgpu_userq_fence_read_wptr(struct amdgpu_device *dev,
     *wptr = (1ULL << 40) + 7;
     return failure == WPTR_READ ? -EIO : 0;
 }
+static int dma_fence_get_status(struct dma_fence *f)
+{
+    assert(queue.state_mutex && f == &previous_fence && f->refs == 1);
+    status_checks++;
+    return f->status;
+}
 static int amdgpu_userq_fence_alloc(struct amdgpu_usermode_queue *q,
                                     struct amdgpu_userq_fence **out)
 {
@@ -256,6 +266,7 @@ static int amdgpu_userq_fence_alloc(struct amdgpu_usermode_queue *q,
     assert(q->state != AMDGPU_USERQ_STATE_HUNG &&
            q->state != AMDGPU_USERQ_STATE_CANCELED &&
            q->state != AMDGPU_USERQ_STATE_INVALID_VA);
+    assert(!q->last_fence || q->last_fence->status >= 0);
     if (failure == FENCE_ALLOC)
         return -ENOMEM;
     fence.base.refs = 1;
@@ -344,12 +355,24 @@ static void run_case(unsigned count, unsigned mask, bool points_present, bool le
                   fail == QUEUE_INVALID_VA ? AMDGPU_USERQ_STATE_INVALID_VA :
                   fail == QUEUE_STOPPED ? AMDGPU_USERQ_STATE_UNMAPPED : 1;
     queue.hang_detect_stopped = fail == QUEUE_STOPPED;
+    status_checks = 0;
+    previous_fence = (struct dma_fence){.refs = 1};
+    if (fail >= LAST_PENDING) {
+        previous_fence.status = fail == LAST_SUCCESS ? 1 :
+                                fail == LAST_CANCELED ? -ECANCELED :
+                                fail == LAST_ERROR ? -EIO : 0;
+        queue.last_fence = &previous_fence;
+        assert(queue.state == 1 && !queue.hang_detect_stopped);
+    }
     struct amdgpu_fpriv fpriv = {0};
     struct drm_file file = { .driver_priv = &fpriv };
     struct drm_device dev = {0};
     assert(amdgpu_userq_signal_ioctl(&dev, &args, &file) == expected);
     assert(!queue.refs && !gem_refs && !queue.state_mutex && !fpriv.userq_mgr.userq_mutex);
     assert(fence.base.refs == published);
+    assert(status_checks == (fail >= LAST_PENDING));
+    if (fail >= LAST_CANCELED)
+        assert(queue.last_fence == &previous_fence && previous_fence.refs == 1);
     for (unsigned i = 1; i < 4; ++i)
         assert(!syncobjs[i].refs);
     if (!expected) {
@@ -396,6 +419,10 @@ int main(void)
     run_case(3, 7, true, false, QUEUE_CANCELED, 0, 0, 0, false, -ECANCELED);
     run_case(3, 7, true, false, QUEUE_INVALID_VA, 0, 0, 0, false, -ECANCELED);
     run_case(3, 7, true, false, QUEUE_STOPPED, 0, 0, 0, false, -ECANCELED);
+    run_case(3, 7, true, false, LAST_PENDING, 0, 0, 0, false, 0);
+    run_case(3, 7, true, false, LAST_SUCCESS, 0, 0, 0, false, 0);
+    run_case(3, 7, true, false, LAST_CANCELED, 0, 0, 0, false, -ECANCELED);
+    run_case(3, 7, true, false, LAST_ERROR, 0, 0, 0, false, -ECANCELED);
     printf("USERQ_SIGNAL: %u cases passed\n", cases);
     return 0;
 }

@@ -578,7 +578,8 @@ int amdgpu_userq_signal_ioctl(struct drm_device *dev, void *data,
 	if (READ_ONCE(queue->hang_detect_stopped) ||
 	    queue->state == AMDGPU_USERQ_STATE_HUNG ||
 	    queue->state == AMDGPU_USERQ_STATE_INVALID_VA ||
-	    queue->state == AMDGPU_USERQ_STATE_CANCELED) {
+	    queue->state == AMDGPU_USERQ_STATE_CANCELED ||
+	    (queue->last_fence && dma_fence_get_status(queue->last_fence) < 0)) {
 		mutex_unlock(&queue->state_mutex);
 		mutex_unlock(&userq_mgr->userq_mutex);
 		r = -ECANCELED;
