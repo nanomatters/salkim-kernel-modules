@@ -45,7 +45,8 @@ class UserqUpstreamTests(unittest.TestCase):
             subprocess.run([str(binary)], check=True, timeout=30)
 
     def test_destroy_watchdog(self):
-        body = self.function('amdgpu_userq.c', 'amdgpu_userq_destroy')
+        body = self.function('amdgpu_userq.c', 'amdgpu_userq_stop_hang_detect_work')
+        body += '\n' + self.function('amdgpu_userq.c', 'amdgpu_userq_destroy')
         self.run_program(DESTROY_HARNESS.replace('ACTUAL_DESTROY', body))
 
 
@@ -69,8 +70,12 @@ DESTROY_HARNESS = r'''
 #include <stdlib.h>
 #include <stdio.h>
 struct mutex { bool held; };
-struct work { bool pending; struct mutex *needed; };
+typedef struct mutex spinlock_t;
+static unsigned spin_depth;
+#define spin_lock_irqsave(lock, flags) do { (flags) = 0; assert(!(lock)->held); (lock)->held = true; spin_depth++; } while (0)
+#define spin_unlock_irqrestore(lock, flags) do { (void)(flags); assert((lock)->held); (lock)->held = false; spin_depth--; } while (0)
 struct amdgpu_usermode_queue;
+struct work { bool pending; struct mutex *needed; struct amdgpu_usermode_queue *queue; };
 struct amdgpu_userq_funcs { void (*mqd_destroy)(struct amdgpu_usermode_queue *); };
 struct reset_domain { int wq; };
 struct amdgpu_device { const struct amdgpu_userq_funcs *userq_funcs[1];
@@ -79,7 +84,11 @@ struct amdgpu_userq_mgr { struct amdgpu_device *adev; struct work resume_work, r
                          struct mutex userq_mutex; int userq_count[1]; };
 struct amdgpu_usermode_queue { unsigned queue_type; struct work hang_detect_work;
                               struct amdgpu_userq_mgr *userq_mgr;
-                              void *fence_drv; struct { void *obj; } db_obj; };
+                              void *fence_drv; struct { void *obj; } db_obj;
+                              spinlock_t hang_detect_lock;
+                              struct mutex state_mutex;
+                              bool hang_detect_stopped, hang_detect_paused,
+                                   hang_detect_reset_requested, hang_detect_armed, waited; };
 static unsigned cancelled, detached, unmapped, destroyed, powered, resets;
 static int unmap_error;
 #define trace_amdgpu_userq_destroy_start(q) ((void)0)
@@ -88,17 +97,23 @@ static int unmap_error;
 #define kfree(p) free(p)
 static void mutex_lock(struct mutex *lock) { assert(!lock->held); lock->held = true; }
 static void mutex_unlock(struct mutex *lock) { assert(lock->held); lock->held = false; }
+static void mutex_destroy(struct mutex *lock) { assert(!lock->held); }
 static void cancel_delayed_work_sync(struct work *work)
 {
-    if (work->pending && work->needed)
+    assert(!spin_depth);
+    if (work->needed)
         assert(!work->needed->held);
+    if (work->queue) {
+        assert(work->queue->hang_detect_stopped && work->queue->waited);
+        assert(!work->queue->state_mutex.held);
+    }
     work->pending = false;
     cancelled++;
 }
 static void amdgpu_userq_wait_for_last_fence(struct amdgpu_usermode_queue *q)
-{ assert(q->userq_mgr->userq_mutex.held); }
+{ assert(q->userq_mgr->userq_mutex.held && !q->hang_detect_stopped); q->waited = true; }
 static void amdgpu_userq_detach_doorbell(struct amdgpu_usermode_queue *q)
-{ assert(q->userq_mgr->userq_mutex.held); detached++; }
+{ assert(q->userq_mgr->userq_mutex.held && q->hang_detect_stopped); detached++; }
 static int amdgpu_userq_unmap_helper(struct amdgpu_usermode_queue *q)
 { assert(q->userq_mgr->userq_mutex.held); unmapped++; return unmap_error; }
 static void atomic_dec(int *value) { assert(*value == 1); --*value; }
@@ -127,6 +142,7 @@ int main(void)
             queue->userq_mgr = &mgr;
             queue->hang_detect_work.pending = pending;
             queue->hang_detect_work.needed = &mgr.userq_mutex;
+            queue->hang_detect_work.queue = queue;
             unmap_error = failed ? -EIO : 0;
             assert(amdgpu_userq_destroy(&mgr, queue) == unmap_error);
             assert(!mgr.userq_mutex.held && mgr.userq_count[0] == 0);
