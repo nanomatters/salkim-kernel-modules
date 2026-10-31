@@ -160,6 +160,29 @@ void amdgpu_evf_mgr_detach_fence(struct amdgpu_eviction_fence_mgr *evf_mgr,
 	dma_fence_put(stub);
 }
 
+/*
+ * Remove eviction requests from the private reservation of a dying BO.
+ * The shared VM reservation and all real completion fences stay intact.
+ */
+void amdgpu_eviction_fence_remove_all(struct amdgpu_bo *bo)
+{
+	struct dma_resv *resv = &bo->tbo.base._resv;
+	struct dma_resv_iter cursor;
+	struct dma_fence *fence, *stub;
+
+	dma_resv_assert_held(resv);
+
+	stub = dma_fence_get_stub();
+	dma_resv_for_each_fence(&cursor, resv, DMA_RESV_USAGE_BOOKKEEP, fence) {
+		if (fence->ops != &amdgpu_eviction_fence_ops)
+			continue;
+
+		dma_resv_replace_fences(resv, fence->context, stub,
+					DMA_RESV_USAGE_BOOKKEEP);
+	}
+	dma_fence_put(stub);
+}
+
 void amdgpu_evf_mgr_init(struct amdgpu_eviction_fence_mgr *evf_mgr)
 {
 	atomic_set(&evf_mgr->ev_fence_seq, 0);
