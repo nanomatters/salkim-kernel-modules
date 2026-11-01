@@ -30,6 +30,7 @@ class UserqResetTests(unittest.TestCase):
             function(mes, 'mes_userq_cancel_locked'),
             function(mes, 'mes_userq_cancel'),
             function(mes, 'mes_userq_reset'),
+            function(mes, 'mes_userq_reset_mmio'),
             function(mes, 'mes_userq_reset_queue'),
             function(gfx, 'amdgpu_gfx_reset_mes_compute'),
             function(userq, 'amdgpu_userq_map_helper'),
@@ -64,6 +65,7 @@ typedef uint64_t u64;
 
 #define AMDGPU_MAX_COMPUTE_RINGS 4
 #define AMDGPU_RING_TYPE_COMPUTE 1
+#define AMDGPU_HW_IP_COMPUTE 1
 #define AMDGPU_USERQ_STATE_UNMAPPED 0
 #define AMDGPU_USERQ_STATE_MAPPED 1
 #define AMDGPU_USERQ_STATE_PREEMPTED 2
@@ -105,7 +107,7 @@ struct amdgpu_mes { unsigned hung_queue_hqd_info_offset; struct mes_funcs *funcs
 struct amdgpu_userq_funcs { int (*map)(struct amdgpu_usermode_queue *);
                           int (*restore)(struct amdgpu_usermode_queue *); };
 struct amdgpu_device {
-    struct { struct { bool use_mmio_for_reset; struct mutex reset_mutex; unsigned mes_hung_db_array[32]; } mec; } gfx;
+    struct { struct { bool use_mmio_for_reset; unsigned num_pipe_per_mec, num_queue_per_pipe; struct mutex reset_mutex; unsigned mes_hung_db_array[32]; } mec; } gfx;
     struct amdgpu_mes mes;
     struct { int sem; } reset_domain_storage, *reset_domain;
     struct { unsigned count; struct amdgpu_usermode_queue *queues[4]; } userq_doorbell_xa;
@@ -133,6 +135,8 @@ static unsigned reset_requests;
 static bool supports_suspend, suspended_hw, removed_hw, reset_done;
 static unsigned gang_ctx_frees;
 static unsigned detected_hung;
+static unsigned expected_pipe, expected_hw_queue;
+static unsigned kcq_dbs[8], kfd_dbs[8];
 static char events[128];
 static unsigned event_count;
 static void event(char c) { assert(event_count + 1 < sizeof(events)); events[event_count++] = c; }
@@ -155,15 +159,17 @@ static int amdgpu_gfx_mes_reset_queue_start(struct amdgpu_ring *ring, unsigned i
 { (void)fence; assert(ring && !id && mmio); ring_resets++; event('k'); return ring_reset_result; }
 static int amdgpu_gfx_reset_mes_kcq(struct amdgpu_device *adev, struct amdgpu_ring *ring, unsigned db,
                                    struct amdgpu_ring **out, struct amdgpu_fence **fence)
-{ (void)adev; (void)ring; (void)db; *out = NULL; *fence = NULL; kcqs++; return 0; }
+{ (void)adev; (void)ring; *out = NULL; *fence = NULL; assert(kcqs < 8); kcq_dbs[kcqs++] = db; return 0; }
 static int amdgpu_amdkfd_reset_mes_queue(struct amdgpu_device *adev, unsigned id, int type, int pipe,
                                         int queue, unsigned db)
-{ (void)adev; (void)id; (void)type; (void)pipe; (void)queue; (void)db; kfds++; return 0; }
+{ (void)adev; (void)id; (void)type; (void)pipe; (void)queue; assert(kfds < 8); kfd_dbs[kfds++] = db; return 0; }
 static int amdgpu_mes_reset_queue_mmio(struct amdgpu_device *adev, int type, unsigned vmid,
                                         unsigned me, unsigned pipe, unsigned queue, unsigned xcc)
-{ (void)adev; assert(type == 1 && !vmid && me == 1 && pipe == 0 && queue == 2 && !xcc);
-  assert(quarantine_claims == 1 && expected_queue->state == AMDGPU_USERQ_STATE_HUNG && !expected_queue->state_mutex.held && expected_queue->hang_detect_stopped);
-  queue_mmio_resets++; reset_done = !reset_result; return reset_result; }
+{ (void)adev; assert(type == 1 && !vmid && me == 1 && pipe == expected_pipe && queue == expected_hw_queue && !xcc);
+  assert(expected_queue->state == AMDGPU_USERQ_STATE_HUNG && expected_queue->hang_detect_stopped);
+  if (!expected_queue->state_mutex.held)
+      assert(quarantine_claims == 1);
+  queue_mmio_resets++; event('m'); reset_done = !reset_result; return reset_result; }
 static int amdgpu_mes_reset_user_queue(struct amdgpu_device *adev, int type, unsigned db, unsigned xcc)
 { (void)adev; assert(type == 1 && db == 8200 && !xcc); assert(quarantine_claims == 1 && expected_queue->state == AMDGPU_USERQ_STATE_HUNG && !expected_queue->state_mutex.held && expected_queue->hang_detect_stopped);
   queue_packet_resets++; reset_done = !reset_result; return reset_result; }
@@ -221,10 +227,15 @@ static void init(struct fixture *f)
     supports_suspend = true;
     suspended_hw = removed_hw = reset_done = false; gang_ctx_frees = 0;
     detected_hung = 0;
+    expected_pipe = 0; expected_hw_queue = 2;
+    memset(kcq_dbs, 0, sizeof(kcq_dbs)); memset(kfd_dbs, 0, sizeof(kfd_dbs));
     memset(events, 0, sizeof(events)); event_count = 0;
     quarantine_claims = 0; expected_queue = &f->queue;
     f->queue.state_mutex.state = &f->queue.state;
     f->dev.gfx.mec.use_mmio_for_reset = true;
+    f->dev.gfx.mec.num_pipe_per_mec = 2;
+    f->dev.gfx.mec.num_queue_per_pipe = 4;
+    f->dev.mes.hung_queue_hqd_info_offset = 16;
     f->dev.mes.funcs = &mes_funcs;
     f->dev.reset_domain = &f->dev.reset_domain_storage;
     f->dev.userq_funcs[1] = &queue_funcs;
@@ -384,8 +395,126 @@ static void cancelled_reset_skips_hardware(void)
     assert(!mes_userq_reset(&f.queue));
     assert(!resets && !removes && !f.queue.state_mutex.held);
 }
+static void set_hung(struct fixture *f, unsigned index, unsigned db, unsigned type,
+                     unsigned pipe, unsigned queue)
+{
+    struct amdgpu_mes_hung_queue_hqd_info *hqd =
+        (void *)&f->dev.gfx.mec.mes_hung_db_array[f->dev.mes.hung_queue_hqd_info_offset];
+    assert(index < 4);
+    f->dev.gfx.mec.mes_hung_db_array[index] = db;
+    hqd[index].queue_type = type;
+    hqd[index].pipe_index = pipe;
+    hqd[index].queue_index = queue;
+}
+static void guilty(struct fixture *f)
+{
+    f->queue.state = AMDGPU_USERQ_STATE_HUNG;
+    f->queue.hang_detect_stopped = true;
+    f->queue.hang_detect_armed = false;
+    f->queue.hang_detect_reset_requested = false;
+    suspend_result = -EIO;
+}
+static void failed_suspend_uses_guilty_mmio(void)
+{
+    struct fixture f;
+    init(&f); guilty(&f); detected_hung = 1;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 0, 2);
+    assert(!run(&f));
+    assert(queue_mmio_resets == 1 && !resets && removes == 1 && stops == 1 && starts == 1);
+    assert(f.queue.state == AMDGPU_USERQ_STATE_CANCELED && !f.queue.state_mutex.held);
+    assert(!forced_fences && resumes == 1 && !f.dev.gfx.mec.reset_mutex.held);
+    assert(strchr(events, 'm') < strchr(events, 'u'));
+    assert(strchr(events, 'u') < strchr(events, 'r'));
+    init(&f); guilty(&f); detected_hung = 1; reset_result = -ETIMEDOUT;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 0, 2);
+    assert(run(&f) == -ETIMEDOUT);
+    assert(queue_mmio_resets == 1 && !resets && !removes && !starts && !forced_fences);
+    assert(f.queue.state == AMDGPU_USERQ_STATE_HUNG && !f.queue.state_mutex.held);
+    assert(resumes == 1);
+    init(&f); guilty(&f); detected_hung = 1; remove_result = -EBUSY;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 0, 2);
+    assert(run(&f) == -EBUSY);
+    assert(queue_mmio_resets == 1 && !resets && removes == 1 && !starts && !forced_fences);
+    assert(f.queue.state == AMDGPU_USERQ_STATE_HUNG && !f.queue.state_mutex.held);
+    init(&f); guilty(&f); detected_hung = 1; resume_result = -EIO;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 0, 2);
+    assert(run(&f) == -EIO && queue_mmio_resets == 1 && !starts);
+    assert(f.queue.state == AMDGPU_USERQ_STATE_CANCELED && removed_hw);
+    init(&f); guilty(&f); detected_hung = 1; detect_result = -EBUSY;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 0, 2);
+    assert(run(&f) == -EBUSY && !queue_mmio_resets && !resets && !removes && !starts);
+}
+static bool contains(const unsigned *values, unsigned count, unsigned value)
+{
+    for (unsigned i = 0; i < count; ++i)
+        if (values[i] == value)
+            return true;
+    return false;
+}
+static void nonfirst_guilty_and_peers(void)
+{
+    struct fixture f;
+    init(&f); guilty(&f); detected_hung = 3;
+    expected_pipe = 1; expected_hw_queue = 3;
+    set_hung(&f, 0, 0x2c08, 1, 0, 1);
+    set_hung(&f, 1, f.queue.doorbell_index, 1, 1, 3);
+    set_hung(&f, 2, 0x3408, 1, 1, 2);
+    assert(!run(&f));
+    assert(queue_mmio_resets == 1 && !resets && removes == 1 && starts == 1);
+    assert(contains(kcq_dbs, kcqs, 0x2c08) && contains(kcq_dbs, kcqs, 0x3408));
+    assert(contains(kfd_dbs, kfds, 0x2c08) && contains(kfd_dbs, kfds, 0x3408));
+}
+static void reject_ambiguous_or_invalid_hqd(void)
+{
+    struct fixture f;
+    init(&f); guilty(&f); detected_hung = 2;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 0, 2);
+    set_hung(&f, 1, f.queue.doorbell_index, 1, 1, 3);
+    assert(run(&f) == -EINVAL && !queue_mmio_resets && !resets && !removes && !starts);
+    init(&f); guilty(&f); detected_hung = 1;
+    set_hung(&f, 0, f.queue.doorbell_index, 0, 0, 2);
+    assert(run(&f) == -EINVAL && !queue_mmio_resets && !resets && !removes && !starts);
+    init(&f); guilty(&f); detected_hung = 1;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 2, 2);
+    assert(run(&f) == -EINVAL && !queue_mmio_resets && !resets && !removes && !starts);
+    init(&f); guilty(&f); detected_hung = 1;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 0, 4);
+    assert(run(&f) == -EINVAL && !queue_mmio_resets && !resets && !removes && !starts);
+}
+static void unmatched_hqd_keeps_firmware_fallback(void)
+{
+    struct fixture f;
+    init(&f); guilty(&f);
+    assert(!run(&f) && !queue_mmio_resets && resets == 1 && removes == 1);
+    init(&f); guilty(&f); detected_hung = 1;
+    set_hung(&f, 0, f.queue.doorbell_index + 4, 1, 1, 3);
+    assert(!run(&f) && !queue_mmio_resets && resets == 1 && removes == 1);
+    init(&f); guilty(&f); detected_hung = 1; f.dev.gfx.mec.use_mmio_for_reset = false;
+    set_hung(&f, 0, f.queue.doorbell_index, 1, 0, 2);
+    assert(!run(&f) && !queue_mmio_resets && resets == 1 && removes == 1);
+}
+static void direct_mmio_guards(void)
+{
+    struct fixture f;
+    init(&f); guilty(&f); cases++;
+    assert(!mes_userq_reset_mmio(&f.queue, 0, 2));
+    assert(queue_mmio_resets == 1 && removes == 1 && !f.queue.state_mutex.held);
+    cases++;
+    assert(!mes_userq_reset_mmio(&f.queue, 0, 2) && queue_mmio_resets == 1 && removes == 1);
+    init(&f); guilty(&f); cases++; f.queue.queue_type = 0;
+    assert(mes_userq_reset_mmio(&f.queue, 0, 2) == -EINVAL && !queue_mmio_resets && !removes);
+    init(&f); guilty(&f); cases++;
+    assert(mes_userq_reset_mmio(&f.queue, 2, 2) == -EINVAL && !queue_mmio_resets && !removes);
+    init(&f); guilty(&f); cases++;
+    assert(mes_userq_reset_mmio(&f.queue, 0, 4) == -EINVAL && !queue_mmio_resets && !removes);
+}
 int main(void)
 {
+    failed_suspend_uses_guilty_mmio();
+    nonfirst_guilty_and_peers();
+    reject_ambiguous_or_invalid_hqd();
+    unmatched_hqd_keeps_firmware_fallback();
+    direct_mmio_guards();
     ordinary_unmap_stays_ordinary();
     cancelled_reset_skips_hardware();
     supported_suspend_cancels();

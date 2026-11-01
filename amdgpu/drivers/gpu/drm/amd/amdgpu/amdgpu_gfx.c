@@ -2345,6 +2345,7 @@ int amdgpu_gfx_reset_mes_compute(struct amdgpu_device *adev,
 	struct amdgpu_mes_hung_queue_hqd_info *hqd_info =
 		(struct amdgpu_mes_hung_queue_hqd_info *)
 		&adev->gfx.mec.mes_hung_db_array[adev->mes.hung_queue_hqd_info_offset];
+	const struct amdgpu_mes_hung_queue_hqd_info *uq_hqd = NULL;
 	int i, r, pipe, queue, queue_type;
 	unsigned int num_hung = 0;
 	bool use_mmio = adev->gfx.mec.use_mmio_for_reset;
@@ -2392,8 +2393,26 @@ fence_reset:
 		n_deferred++;
 	}
 	if (uq) {
-		/* A suspended queue only needs removal before other gangs resume. */
-		r = suspended ? mes_userq_cancel(uq, false) : mes_userq_reset(uq);
+		if (suspended) {
+			/* A suspended queue only needs removal before gangs resume. */
+			r = mes_userq_cancel(uq, false);
+		} else {
+			/* Use MES coordinates for a queue that could not be suspended. */
+			for (i = 0; use_mmio && i < num_hung; i++) {
+				if (adev->gfx.mec.mes_hung_db_array[i] != uq->doorbell_index)
+					continue;
+				if (uq_hqd || hqd_info[i].queue_type != AMDGPU_RING_TYPE_COMPUTE) {
+					r = -EINVAL;
+					goto out;
+				}
+				uq_hqd = &hqd_info[i];
+			}
+			if (uq_hqd)
+				r = mes_userq_reset_mmio(uq, uq_hqd->pipe_index,
+							 uq_hqd->queue_index);
+			else
+				r = mes_userq_reset(uq);
+		}
 		if (r)
 			goto out;
 	}

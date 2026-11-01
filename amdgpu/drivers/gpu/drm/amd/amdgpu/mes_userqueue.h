@@ -30,6 +30,8 @@ extern const struct amdgpu_userq_funcs userq_mes_funcs;
 
 int mes_userq_cancel(struct amdgpu_usermode_queue *queue, bool after_reset);
 int mes_userq_reset(struct amdgpu_usermode_queue *queue);
+int mes_userq_reset_mmio(struct amdgpu_usermode_queue *queue,
+			 unsigned int pipe, unsigned int hw_queue);
 int mes_userq_reset_queue(struct amdgpu_device *adev,
 			  struct amdgpu_usermode_queue *guilty_uq,
 			  int queue_type,

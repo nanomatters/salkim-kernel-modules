@@ -263,6 +263,28 @@ int mes_userq_reset(struct amdgpu_usermode_queue *queue)
 	return mes_userq_cancel_locked(queue, true);
 }
 
+int mes_userq_reset_mmio(struct amdgpu_usermode_queue *queue,
+			 unsigned int pipe, unsigned int hw_queue)
+{
+	struct amdgpu_device *adev = queue->userq_mgr->adev;
+	int r;
+
+	guard(mutex)(&queue->state_mutex);
+	if (queue->state == AMDGPU_USERQ_STATE_CANCELED)
+		return 0;
+	if (queue->queue_type != AMDGPU_HW_IP_COMPUTE ||
+	    pipe >= adev->gfx.mec.num_pipe_per_mec ||
+	    hw_queue >= adev->gfx.mec.num_queue_per_pipe)
+		return -EINVAL;
+
+	r = amdgpu_mes_reset_queue_mmio(adev, queue->queue_type, 0, 1,
+					pipe, hw_queue, 0);
+	if (r)
+		return r;
+
+	return mes_userq_cancel_locked(queue, true);
+}
+
 int mes_userq_reset_queue(struct amdgpu_device *adev,
 			  struct amdgpu_usermode_queue *guilty_uq,
 			  int queue_type,
