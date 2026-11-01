@@ -182,7 +182,7 @@ static int mes_userq_map(struct amdgpu_usermode_queue *queue)
 	return 0;
 }
 
-static int mes_userq_unmap(struct amdgpu_usermode_queue *queue)
+static int mes_userq_unmap_queue(struct amdgpu_usermode_queue *queue, bool after_reset)
 {
 	struct amdgpu_userq_mgr *uq_mgr = queue->userq_mgr;
 	struct amdgpu_device *adev = uq_mgr->adev;
@@ -196,6 +196,8 @@ static int mes_userq_unmap(struct amdgpu_usermode_queue *queue)
 	queue_input.doorbell_offset = queue->doorbell_index;
 	queue_input.gang_context_addr = ctx->gpu_addr;
 	queue_input.queue_type = queue->queue_type;
+	/* Avoid another hardware unmap after the HQD has been reset. */
+	queue_input.remove_queue_after_reset = after_reset;
 
 	amdgpu_mes_lock(&adev->mes);
 	r = adev->mes.funcs->remove_hw_queue(&adev->mes, &queue_input);
@@ -207,16 +209,19 @@ static int mes_userq_unmap(struct amdgpu_usermode_queue *queue)
 	return r;
 }
 
-/* The caller must stop queue execution before cancelling it. */
-int mes_userq_cancel(struct amdgpu_usermode_queue *queue)
+static int mes_userq_unmap(struct amdgpu_usermode_queue *queue)
+{
+	return mes_userq_unmap_queue(queue, false);
+}
+
+static int mes_userq_cancel_locked(struct amdgpu_usermode_queue *queue, bool after_reset)
 {
 	int r;
 
-	guard(mutex)(&queue->state_mutex);
 	if (queue->state == AMDGPU_USERQ_STATE_CANCELED)
 		return 0;
 
-	r = mes_userq_unmap(queue);
+	r = mes_userq_unmap_queue(queue, after_reset);
 	if (r)
 		return r;
 
@@ -226,12 +231,23 @@ int mes_userq_cancel(struct amdgpu_usermode_queue *queue)
 	return 0;
 }
 
+/* The caller must stop queue execution before cancelling it. */
+int mes_userq_cancel(struct amdgpu_usermode_queue *queue, bool after_reset)
+{
+	guard(mutex)(&queue->state_mutex);
+	return mes_userq_cancel_locked(queue, after_reset);
+}
+
 int mes_userq_reset(struct amdgpu_usermode_queue *queue)
 {
 	struct amdgpu_userq_mgr *uq_mgr = queue->userq_mgr;
 	struct amdgpu_device *adev = uq_mgr->adev;
 	struct mes_reset_queue_input queue_input;
 	int r;
+
+	guard(mutex)(&queue->state_mutex);
+	if (queue->state == AMDGPU_USERQ_STATE_CANCELED)
+		return 0;
 
 	/* XXX: add a FW version check for SDMA per queue reset */
 	memset(&queue_input, 0x0, sizeof(struct mes_reset_queue_input));
@@ -244,7 +260,7 @@ int mes_userq_reset(struct amdgpu_usermode_queue *queue)
 	if (r)
 		return r;
 
-	return mes_userq_cancel(queue);
+	return mes_userq_cancel_locked(queue, true);
 }
 
 int mes_userq_reset_queue(struct amdgpu_device *adev,
@@ -283,7 +299,7 @@ int mes_userq_reset_queue(struct amdgpu_device *adev,
 					r = amdgpu_mes_reset_user_queue(adev, queue_type, db, 0);
 				if (r)
 					return r;
-				r = mes_userq_cancel(uq);
+				r = mes_userq_cancel(uq, true);
 				if (r)
 					return r;
 				amdgpu_userq_fence_driver_force_completion(uq);

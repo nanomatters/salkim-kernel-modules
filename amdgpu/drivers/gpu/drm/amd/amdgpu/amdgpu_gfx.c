@@ -2393,7 +2393,7 @@ fence_reset:
 	}
 	if (uq) {
 		/* A suspended queue only needs removal before other gangs resume. */
-		r = suspended ? mes_userq_cancel(uq) : mes_userq_reset(uq);
+		r = suspended ? mes_userq_cancel(uq, false) : mes_userq_reset(uq);
 		if (r)
 			goto out;
 	}

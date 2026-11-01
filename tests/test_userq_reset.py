@@ -25,6 +25,9 @@ class UserqResetTests(unittest.TestCase):
         gfx = (AMD / 'amdgpu_gfx.c').read_text()
         userq = (AMD / 'amdgpu_userq.c').read_text()
         source = '\n'.join([
+            function(mes, 'mes_userq_unmap_queue'),
+            function(mes, 'mes_userq_unmap'),
+            function(mes, 'mes_userq_cancel_locked'),
             function(mes, 'mes_userq_cancel'),
             function(mes, 'mes_userq_reset'),
             function(mes, 'mes_userq_reset_queue'),
@@ -82,6 +85,8 @@ static void unlock_guard(struct mutex **mutex) { mutex_unlock(*mutex); }
 #define JOIN(a,b) JOIN_(a,b)
 #define guard(type) __attribute__((cleanup(unlock_guard))) struct mutex *JOIN(guard_, __COUNTER__) = lock_guard
 #define dev_err(...) ((void)0)
+#define DRM_ERROR(...) ((void)0)
+#define lockdep_assert_held(mutex) assert((mutex)->held)
 #define READ_ONCE(value) (value)
 #define xa_for_each(xa, id, item) \
     for ((id) = 0; (id) < (xa)->count && (((item) = (xa)->queues[id]), 1); (id)++)
@@ -92,11 +97,11 @@ struct amdgpu_fence { int unused; };
 struct amdgpu_ring { int unused; };
 struct amdgpu_gfx_deferred_entry { struct amdgpu_ring *ring; struct amdgpu_fence *fence; };
 struct amdgpu_mes_hung_queue_hqd_info { int pipe_index, queue_index, queue_type; };
-struct mes_remove_queue_input { int unused; };
+struct mes_remove_queue_input { unsigned gang_context_array_index, doorbell_offset, queue_type; u64 gang_context_addr; bool remove_queue_after_reset; };
 struct mes_reset_queue_input { unsigned doorbell_offset, queue_type; bool use_mmio; };
 struct mes_funcs { int (*reset_hw_queue)(void *, struct mes_reset_queue_input *);
                    int (*remove_hw_queue)(void *, struct mes_remove_queue_input *); };
-struct amdgpu_mes { unsigned hung_queue_hqd_info_offset; struct mes_funcs *funcs; };
+struct amdgpu_mes { unsigned hung_queue_hqd_info_offset; struct mes_funcs *funcs; bool use_rs64mem; };
 struct amdgpu_userq_funcs { int (*map)(struct amdgpu_usermode_queue *);
                           int (*restore)(struct amdgpu_usermode_queue *); };
 struct amdgpu_device {
@@ -107,7 +112,8 @@ struct amdgpu_device {
     const struct amdgpu_userq_funcs *userq_funcs[3];
 };
 struct amdgpu_userq_mgr { struct amdgpu_device *adev; int userq_mutex; };
-struct amdgpu_usermode_queue { struct mutex state_mutex; struct amdgpu_userq_mgr *userq_mgr; unsigned state, queue_type, doorbell_index; int hang_detect_lock, hang_detect_work;
+struct amdgpu_userq_obj { u64 gpu_addr; };
+struct amdgpu_usermode_queue { struct amdgpu_userq_obj fw_obj; unsigned gang_ctx_array_index; struct mutex state_mutex; struct amdgpu_userq_mgr *userq_mgr; unsigned state, queue_type, doorbell_index; int hang_detect_lock, hang_detect_work;
     bool hang_detect_stopped, hang_detect_armed, hang_detect_reset_requested; };
 
 static struct amdgpu_usermode_queue *expected_queue;
@@ -124,7 +130,8 @@ static int suspend_result, resume_result, detect_result, remove_result, reset_re
 static int ring_reset_result, replay_result, lock_result, restore_result, map_result;
 static bool pending_fence;
 static unsigned reset_requests;
-static bool supports_suspend, suspended_hw, removed_hw;
+static bool supports_suspend, suspended_hw, removed_hw, reset_done;
+static unsigned gang_ctx_frees;
 static unsigned detected_hung;
 static char events[128];
 static unsigned event_count;
@@ -156,27 +163,36 @@ static int amdgpu_mes_reset_queue_mmio(struct amdgpu_device *adev, int type, uns
                                         unsigned me, unsigned pipe, unsigned queue, unsigned xcc)
 { (void)adev; assert(type == 1 && !vmid && me == 1 && pipe == 0 && queue == 2 && !xcc);
   assert(quarantine_claims == 1 && expected_queue->state == AMDGPU_USERQ_STATE_HUNG && !expected_queue->state_mutex.held && expected_queue->hang_detect_stopped);
-  queue_mmio_resets++; return reset_result; }
+  queue_mmio_resets++; reset_done = !reset_result; return reset_result; }
 static int amdgpu_mes_reset_user_queue(struct amdgpu_device *adev, int type, unsigned db, unsigned xcc)
 { (void)adev; assert(type == 1 && db == 8200 && !xcc); assert(quarantine_claims == 1 && expected_queue->state == AMDGPU_USERQ_STATE_HUNG && !expected_queue->state_mutex.held && expected_queue->hang_detect_stopped);
-  queue_packet_resets++; return reset_result; }
+  queue_packet_resets++; reset_done = !reset_result; return reset_result; }
 static void amdgpu_userq_fence_driver_force_completion(struct amdgpu_usermode_queue *queue)
 { assert(removed_hw && queue->state == AMDGPU_USERQ_STATE_CANCELED); forced_fences++; }
 static int amdgpu_ring_reset_helper_end(struct amdgpu_ring *ring, struct amdgpu_fence *fence)
 { (void)fence; assert(ring && !suspended_hw && resumes); ring_replays++; event('e'); return replay_result; }
 static void amdgpu_mes_lock(struct amdgpu_mes *mes) { assert(mes); }
 static void amdgpu_mes_unlock(struct amdgpu_mes *mes) { assert(mes); }
+static void amdgpu_mes_free_gang_ctx_index(struct amdgpu_mes *mes, unsigned index)
+{ assert(mes && index == expected_queue->gang_ctx_array_index); gang_ctx_frees++; }
 static int down_read_trylock(int *sem) { assert(sem); return lock_result; }
 static void up_read(int *sem) { assert(sem); }
 static void trace_amdgpu_userq_state_start(struct amdgpu_usermode_queue *queue) { assert(queue); }
 static void trace_amdgpu_userq_state_changed(struct amdgpu_usermode_queue *queue, unsigned state)
 { assert(queue); if (state == AMDGPU_USERQ_STATE_CANCELED) cancel_traces++; }
 static int remove_hw_queue(void *mes, struct mes_remove_queue_input *input)
-{ assert(mes && input); removes++; event('u'); if (!remove_result) removed_hw = true; return remove_result; }
+{ assert(mes && input);
+  if (input->doorbell_offset) {
+      assert(expected_queue->state_mutex.held);
+      assert(input->doorbell_offset == expected_queue->doorbell_index);
+      assert(input->gang_context_addr == expected_queue->fw_obj.gpu_addr);
+      assert(input->gang_context_array_index == expected_queue->gang_ctx_array_index);
+      assert(input->queue_type == expected_queue->queue_type);
+      assert(input->remove_queue_after_reset == reset_done);
+  }
+  removes++; event('u'); if (!remove_result) removed_hw = true; return remove_result; }
 static int reset_hw_queue(void *mes, struct mes_reset_queue_input *input)
-{ assert(mes && input && !input->use_mmio); resets++; event('x'); return reset_result; }
-static int mes_userq_unmap(struct amdgpu_usermode_queue *queue)
-{ assert(queue->state_mutex.held); struct mes_remove_queue_input input = {0}; return remove_hw_queue(&queue->userq_mgr->adev->mes, &input); }
+{ assert(mes && input && !input->use_mmio && expected_queue->state_mutex.held); resets++; event('x'); reset_done = !reset_result; return reset_result; }
 static int queue_map(struct amdgpu_usermode_queue *queue)
 { maps++; assert(queue->state != AMDGPU_USERQ_STATE_CANCELED); return map_result; }
 static int queue_restore(struct amdgpu_usermode_queue *queue)
@@ -203,7 +219,7 @@ static void init(struct fixture *f)
     pending_fence = false;
     lock_result = 1;
     supports_suspend = true;
-    suspended_hw = removed_hw = false;
+    suspended_hw = removed_hw = reset_done = false; gang_ctx_frees = 0;
     detected_hung = 0;
     memset(events, 0, sizeof(events)); event_count = 0;
     quarantine_claims = 0; expected_queue = &f->queue;
@@ -219,6 +235,8 @@ static void init(struct fixture *f)
     f->queue.state = AMDGPU_USERQ_STATE_MAPPED;
     f->queue.queue_type = 1;
     f->queue.doorbell_index = 8200;
+    f->queue.fw_obj.gpu_addr = 0x1122334455667788ull;
+    f->queue.gang_ctx_array_index = 23;
     f->queue.hang_detect_armed = f->queue.hang_detect_reset_requested = true;
 }
 static int run(struct fixture *f)
@@ -234,7 +252,7 @@ static void supported_suspend_cancels(void)
     assert(removes == 1 && !resets && cancel_traces == 1 && starts == 1);
     assert(removed_hw && f.queue.state == AMDGPU_USERQ_STATE_CANCELED && !f.queue.state_mutex.held);
     cases++;
-    assert(!mes_userq_cancel(&f.queue) && removes == 1 && !f.queue.state_mutex.held);
+    assert(!mes_userq_cancel(&f.queue, false) && removes == 1 && !f.queue.state_mutex.held);
     assert(!amdgpu_userq_map_helper(&f.queue) && !maps);
     assert(!amdgpu_userq_restore_helper(&f.queue) && !restores);
     assert(!amdgpu_userq_post_reset(&f.dev, false) && !maps);
@@ -346,8 +364,30 @@ static void normal_queue_lifecycle(void)
     init(&f); f.queue.state = AMDGPU_USERQ_STATE_HUNG; f.queue.hang_detect_stopped = true; cases++;
     assert(!amdgpu_userq_post_reset(&f.dev, false) && !maps);
 }
+static void ordinary_unmap_stays_ordinary(void)
+{
+    struct fixture f;
+    init(&f); cases++;
+    mutex_lock(&f.queue.state_mutex);
+    assert(!mes_userq_unmap(&f.queue));
+    mutex_unlock(&f.queue.state_mutex);
+    assert(removes == 1 && !resets && !cancel_traces && !gang_ctx_frees);
+    assert(f.queue.state == AMDGPU_USERQ_STATE_MAPPED);
+    init(&f); cases++; f.dev.mes.use_rs64mem = true;
+    assert(!mes_userq_cancel(&f.queue, false));
+    assert(removes == 1 && gang_ctx_frees == 1 && !f.queue.state_mutex.held);
+}
+static void cancelled_reset_skips_hardware(void)
+{
+    struct fixture f;
+    init(&f); cases++; f.queue.state = AMDGPU_USERQ_STATE_CANCELED;
+    assert(!mes_userq_reset(&f.queue));
+    assert(!resets && !removes && !f.queue.state_mutex.held);
+}
 int main(void)
 {
+    ordinary_unmap_stays_ordinary();
+    cancelled_reset_skips_hardware();
     supported_suspend_cancels();
     failures_do_not_report_success();
     unsupported_or_failed_suspend_keeps_reset();
