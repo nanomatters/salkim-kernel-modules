@@ -254,3 +254,5 @@ ebaf216661889cf655f27541d5feeec89fbe8714 drm/amdgpu: Release reservations after 
 38e934e88b784ed3189eb6567f2ac741103fbff0 drm/amdgpu/vce: Avoid scheduler fences in direct IB tests.
 
 1a556591ad19c792e8b3340bc516fa52d2aaa9fa drm/amdgpu: Handle CS chunk allocation failure safely.
+
+b284f8caa5ca2954340c8a7435001099237ae171 drm/amdgpu: Enable HDMI audio only for capable displays.
