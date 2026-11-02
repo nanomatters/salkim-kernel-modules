@@ -423,6 +423,13 @@ struct mes_misc_op_input {
 	};
 };
 
+struct mes_change_gang_priority_input {
+	u64 gang_context_addr;
+	u64 gang_quantum;
+	u32 gang_context_array_index;
+	u32 gang_global_priority_level;
+};
+
 struct amdgpu_mes_funcs {
 	int (*add_hw_queue)(struct amdgpu_mes *mes,
 			    struct mes_add_queue_input *input);
@@ -441,6 +448,9 @@ struct amdgpu_mes_funcs {
 
 	int (*resume_gang)(struct amdgpu_mes *mes,
 			   struct mes_resume_gang_input *input);
+
+	int (*change_gang_priority)(struct amdgpu_mes *mes,
+				    struct mes_change_gang_priority_input *input);
 
 	int (*misc_op)(struct amdgpu_mes *mes,
 		       struct mes_misc_op_input *input);

@@ -830,6 +830,25 @@ static int mes_v12_0_resume_gang(struct amdgpu_mes *mes,
 			offsetof(union MESAPI__RESUME, api_status));
 }
 
+static int mes_v12_0_change_gang_priority(struct amdgpu_mes *mes,
+					  struct mes_change_gang_priority_input *input)
+{
+	union MESAPI__CHANGE_GANG_PRIORITY_LEVEL packet = {};
+
+	packet.header.type = MES_API_TYPE_SCHEDULER;
+	packet.header.opcode = MES_SCH_API_CHANGE_GANG_PRORITY;
+	packet.header.dwsize = API_FRAME_SIZE_IN_DWORDS;
+	packet.inprocess_gang_priority = AMDGPU_MES_PRIORITY_LEVEL_NORMAL;
+	packet.gang_global_priority_level = input->gang_global_priority_level;
+	packet.gang_quantum = input->gang_quantum;
+	packet.gang_context_addr = input->gang_context_addr;
+	packet.gang_context_array_index = input->gang_context_array_index;
+
+	return mes_v12_0_submit_pkt_and_poll_completion(mes, AMDGPU_MES_SCHED_PIPE,
+			&packet, sizeof(packet),
+			offsetof(union MESAPI__CHANGE_GANG_PRIORITY_LEVEL, api_status));
+}
+
 static int mes_v12_0_query_sched_status(struct amdgpu_mes *mes, int pipe)
 {
 	union MESAPI__QUERY_MES_STATUS mes_status_pkt;
@@ -1225,6 +1244,7 @@ static const struct amdgpu_mes_funcs mes_v12_0_funcs = {
 	.unmap_legacy_queue = mes_v12_0_unmap_legacy_queue,
 	.suspend_gang = mes_v12_0_suspend_gang,
 	.resume_gang = mes_v12_0_resume_gang,
+	.change_gang_priority = mes_v12_0_change_gang_priority,
 	.misc_op = mes_v12_0_misc_op,
 	.reset_hw_queue = mes_v12_0_reset_hw_queue,
 	.invalidate_tlbs_pasid = mes_v12_0_inv_tlbs_pasid,
