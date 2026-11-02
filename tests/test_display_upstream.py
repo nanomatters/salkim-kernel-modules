@@ -229,6 +229,97 @@ int main(void)
 '''.replace('ACTUAL_FUNCTION', function).replace(
             '(i) == 0; ++(i)', '(void)(crtc), (i) == 0; ++(i)'))
 
+    def test_vrr_reference_lifetime(self):
+        active = self.function('amdgpu_dm/amdgpu_dm_crtc.c', 'amdgpu_dm_crtc_vrr_active')
+        transition = self.function('amdgpu_dm/amdgpu_dm_freesync.c',
+                                   'amdgpu_dm_handle_vrr_transition')
+        self.run_program(r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+enum { VRR_STATE_UNSUPPORTED, VRR_STATE_DISABLED, VRR_STATE_INACTIVE,
+       VRR_STATE_ACTIVE_VARIABLE, VRR_STATE_ACTIVE_FIXED };
+struct drm_crtc { int references; bool active; };
+struct drm_crtc_state { struct drm_crtc *crtc; bool active; };
+struct dm_crtc_state {
+    struct drm_crtc_state base;
+    struct { int state; } freesync_config;
+    void *stream;
+};
+struct amdgpu_device { int dce; };
+struct amdgpu_display_manager { struct amdgpu_device *adev; int dc, dc_lock; };
+static unsigned gets, puts, irq_enable, irq_disable, events;
+#define amdgpu_ip_version(adev, block, instance) ((adev)->dce)
+#define WARN_ON(condition) assert(!(condition))
+#define drm_dbg_driver(...) ((void)0)
+#define scoped_guard(...) for (int guard = 1; guard; guard = 0)
+#define dc_exit_ips_for_hw_access(dc) ((void)(dc))
+#define psr_event_vrr_transition 1
+#define replay_event_vrr 2
+static int drm_crtc_vblank_get(struct drm_crtc *crtc)
+{
+    assert(crtc->active);
+    crtc->references++;
+    gets++;
+    return 0;
+}
+static void drm_crtc_vblank_put(struct drm_crtc *crtc)
+{
+    assert(crtc->references > 0);
+    crtc->references--;
+    puts++;
+}
+static int amdgpu_dm_crtc_set_vupdate_irq(struct drm_crtc *crtc, bool enable)
+{
+    (void)crtc;
+    if (enable)
+        irq_enable++;
+    else
+        irq_disable++;
+    return 0;
+}
+static void set_event(struct amdgpu_display_manager *dm, void *stream,
+                      bool active, int event, bool value)
+{
+    (void)dm;
+    (void)stream;
+    assert(event == psr_event_vrr_transition || event == replay_event_vrr);
+    assert(active == value);
+    events++;
+}
+#define amdgpu_dm_psr_set_event set_event
+#define amdgpu_dm_replay_set_event set_event
+ACTUAL_FUNCTIONS
+static void check(int dce, bool old_active, int old_vrr, bool new_active, int new_vrr)
+{
+    struct amdgpu_device adev = { dce };
+    struct amdgpu_display_manager dm = { &adev, 0, 0 };
+    struct drm_crtc crtc = { 2, new_active };
+    struct dm_crtc_state old = { { &crtc, old_active }, { old_vrr }, NULL };
+    struct dm_crtc_state new = { { &crtc, new_active }, { new_vrr }, NULL };
+    bool held_before = old_active && old_vrr >= VRR_STATE_ACTIVE_VARIABLE;
+    bool held_after = new_active && new_vrr >= VRR_STATE_ACTIVE_VARIABLE;
+    gets = puts = irq_enable = irq_disable = events = 0;
+    amdgpu_dm_handle_vrr_transition(&dm, &old, &new);
+    assert(crtc.references == 2 + held_after - held_before);
+    assert(gets == (!held_before && held_after));
+    assert(puts == (held_before && !held_after));
+    assert(irq_enable == (!dce && !held_before && held_after));
+    assert(irq_disable == (!dce && held_before && !held_after));
+    assert(events == 2 * (held_before != held_after));
+}
+int main(void)
+{
+    for (int dce = 0; dce <= 1; dce++)
+        for (int old_active = 0; old_active <= 1; old_active++)
+            for (int new_active = 0; new_active <= 1; new_active++)
+                for (int old_vrr = VRR_STATE_UNSUPPORTED; old_vrr <= VRR_STATE_ACTIVE_FIXED; old_vrr++)
+                    for (int new_vrr = VRR_STATE_UNSUPPORTED; new_vrr <= VRR_STATE_ACTIVE_FIXED; new_vrr++)
+                        check(dce, old_active, old_vrr, new_active, new_vrr);
+    return 0;
+}
+'''.replace('ACTUAL_FUNCTIONS', active + '\n' + transition))
+
 
 if __name__ == '__main__':
     unittest.main()
