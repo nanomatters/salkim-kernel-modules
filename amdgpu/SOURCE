@@ -256,3 +256,5 @@ ebaf216661889cf655f27541d5feeec89fbe8714 drm/amdgpu: Release reservations after 
 1a556591ad19c792e8b3340bc516fa52d2aaa9fa drm/amdgpu: Handle CS chunk allocation failure safely.
 
 b284f8caa5ca2954340c8a7435001099237ae171 drm/amdgpu: Enable HDMI audio only for capable displays.
+
+899ab786614d4237038e07389d438f40848a0b01 drm/amd/pm: Track SMU11 ArmD3 BACO state.
