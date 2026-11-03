@@ -228,7 +228,15 @@ static void drm_syncobj_replace_fence(struct drm_syncobj *obj, struct dma_fence 
 static void drm_syncobj_add_point(struct drm_syncobj *obj, struct dma_fence_chain *node,
                                   struct dma_fence *f, u64 point)
 { assert(node && point); drm_syncobj_replace_fence(obj, f); }
+#if defined(__GNUC__) && !defined(__clang__)
+/* Match the kernel warning policy for conditionally initialized mappings. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 ACTUAL_FUNCTIONS
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 static struct drm_amdgpu_gem_va reset(void)
 {
     memset(bos, 0, sizeof(bos));
