@@ -190,3 +190,6 @@ drm/amd/display: Hold VRR vblank references only while active.
 
 https://mail-archive.com/amd-gfx%40lists.freedesktop.org/msg154782.html
 drm/amdgpu: Avoid releasing gang dependencies twice.
+
+https://mail-archive.com/amd-gfx%40lists.freedesktop.org/msg154785.html
+drm/amdgpu: Validate evicted idle BOs before UserQ restore.

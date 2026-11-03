@@ -119,6 +119,7 @@ struct drm_exec { struct ww_acquire_ctx ticket; };
 #define AMDGPU_GEM_DOMAIN_GTT 2
 #define TTM_PL_SYSTEM 0
 #define unlikely(condition) (condition)
+#define likely(condition) (condition)
 #define drm_exec_until_all_locked(exec) for (bool once = true; once; once = false)
 #define drm_exec_retry_on_contention(exec) ((void)0)
 #define xa_for_each(array, index, value) \

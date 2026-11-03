@@ -1119,6 +1119,7 @@ amdgpu_userq_bo_validate(struct amdgpu_device *adev, struct drm_exec *exec,
 	struct amdgpu_bo *bo, *tmp;
 	int ret;
 
+retry:
 	spin_lock(&vm->individual_lock);
 	while (!list_empty(&vm->individual.evicted) ||
 	       !list_empty(&vm->individual.needs_update)) {
@@ -1149,6 +1150,35 @@ amdgpu_userq_bo_validate(struct amdgpu_device *adev, struct drm_exec *exec,
 			return ret;
 
 		spin_lock(&vm->individual_lock);
+	}
+
+	/*
+	 * A GEM_VA operation or a kernel CS can update the PTEs of an evicted
+	 * BO without validating it, which moves it to the idle list with PTEs
+	 * pointing nowhere. Validate those as well, that moves them back to the
+	 * needs_update list.
+	 */
+	list_for_each_entry(bo_va, &vm->individual.idle, base.vm_status) {
+		bo = bo_va->base.bo;
+		if (!bo || amdgpu_ttm_tt_is_userptr(bo->tbo.ttm) ||
+		    (bo->allowed_domains & AMDGPU_GEM_DOMAIN_CPU) ||
+		    (bo->tbo.resource &&
+		     bo->tbo.resource->mem_type != TTM_PL_SYSTEM))
+			continue;
+
+		tmp = amdgpu_bo_ref(bo);
+		spin_unlock(&vm->individual_lock);
+
+		ret = drm_exec_prepare_obj(exec, &bo->tbo.base,
+					   TTM_NUM_MOVE_FENCES + 1);
+		if (likely(!ret)) {
+			amdgpu_bo_placement_from_domain(bo, bo->allowed_domains);
+			ret = ttm_bo_validate(&bo->tbo, &bo->placement, &ctx);
+		}
+		amdgpu_bo_unref(&tmp);
+		if (ret)
+			return ret;
+		goto retry;
 	}
 	spin_unlock(&vm->individual_lock);
 
