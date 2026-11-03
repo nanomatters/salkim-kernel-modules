@@ -193,3 +193,6 @@ drm/amdgpu: Avoid releasing gang dependencies twice.
 
 https://mail-archive.com/amd-gfx%40lists.freedesktop.org/msg154785.html
 drm/amdgpu: Validate evicted idle BOs before UserQ restore.
+
+https://mail-archive.com/amd-gfx%40lists.freedesktop.org/msg154648.html
+drm/amdgpu: Rewrite every mapping after VM reset.

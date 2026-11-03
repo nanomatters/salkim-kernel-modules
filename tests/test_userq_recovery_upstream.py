@@ -61,6 +61,15 @@ class CoreUpstreamTests(unittest.TestCase):
         body = function('amdgpu_userq.c', 'amdgpu_userq_bo_validate')
         run_program(IDLE_HARNESS.replace('ACTUAL_IDLE_VALIDATION', body))
 
+    def test_reset_mapping_rewrite(self):
+        reset = function('amdgpu_vm.c', 'amdgpu_vm_bo_reset_state_machine')
+        update = function('amdgpu_vm.c', 'amdgpu_vm_bo_needs_update')
+        body = function('amdgpu_vm.c', 'amdgpu_vm_bo_update_internal')
+        start = body.index('\tif (!clear && bo_va->base.moved)')
+        end = body.index('\n\tbatching =', start)
+        harness = RESET_HARNESS.replace('ACTUAL_NEEDS_UPDATE', update).replace('ACTUAL_RESET', reset)
+        run_program(harness.replace('ACTUAL_INVALIDATE', body[start:end]))
+
 
 GANG_HARNESS = r'''
 #include <assert.h>
@@ -375,6 +384,142 @@ int main(void)
     finish();
     cases++;
     printf("UserQ idle restore: %u validation, retry and list mutation cases passed\n", cases);
+    return 0;
+}
+'''
+
+
+RESET_HARNESS = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#define container_of(ptr, type, field) ((type *)((char *)(ptr) - offsetof(type, field)))
+struct list_head { struct list_head *next, *prev; };
+static void list_init(struct list_head *head) { head->next = head->prev = head; }
+static bool list_empty(const struct list_head *head) { return head->next == head; }
+static void list_add(struct list_head *node, struct list_head *head)
+{
+    node->next = head->next;
+    node->prev = head;
+    head->next->prev = node;
+    head->next = node;
+}
+static void list_move(struct list_head *node, struct list_head *head)
+{
+    node->prev->next = node->next;
+    node->next->prev = node->prev;
+    list_add(node, head);
+}
+static void list_splice_init(struct list_head *from, struct list_head *to)
+{
+    while (!list_empty(from))
+        list_move(from->prev, to);
+}
+#define list_for_each_entry(pos, head, field) \
+    for (struct list_head *node = (head)->next; node != (head) && \
+         ((pos) = container_of(node, __typeof__(*(pos)), field), true); node = node->next)
+#define list_for_each_entry_safe(pos, tmp, head, field) \
+    for (struct list_head *node = (head)->next, *next = node->next; node != (head) && \
+         ((pos) = container_of(node, __typeof__(*(pos)), field), \
+          (tmp) = next == (head) ? NULL : container_of(next, __typeof__(*(tmp)), field), (void)(tmp), true); \
+         node = next, next = node->next)
+struct amdgpu_bo { int unused; };
+struct amdgpu_vm_bo_status { struct list_head idle, needs_update, evicted; };
+struct amdgpu_vm {
+    struct { struct amdgpu_bo *bo; } root;
+    struct amdgpu_vm_bo_status kernel, always_valid, individual;
+    bool individual_lock, root_locked;
+};
+struct amdgpu_vm_bo_base {
+    struct list_head vm_status;
+    struct amdgpu_bo *bo;
+    struct amdgpu_vm *vm;
+    struct amdgpu_vm_bo_status *lists;
+    bool moved;
+};
+struct amdgpu_bo_va {
+    struct amdgpu_vm_bo_base base;
+    struct list_head valids, invalids;
+    bool cleared;
+};
+static void spin_lock(bool *lock) { assert(!*lock); *lock = true; }
+static void spin_unlock(bool *lock) { assert(*lock); *lock = false; }
+static void amdgpu_vm_assert_locked(struct amdgpu_vm *vm) { assert(vm->root_locked); }
+static struct amdgpu_vm_bo_status *amdgpu_vm_bo_lock_lists(struct amdgpu_vm_bo_base *base)
+{
+    assert(base->vm->root_locked);
+    return base->lists;
+}
+static void amdgpu_vm_bo_unlock_lists(struct amdgpu_vm_bo_base *base) { assert(base->vm->root_locked); }
+ACTUAL_NEEDS_UPDATE
+ACTUAL_RESET
+static void invalidate_mappings(struct amdgpu_bo_va *bo_va)
+{
+    bool clear = false, flush_tlb = false;
+ACTUAL_INVALIDATE
+    assert(flush_tlb);
+}
+static unsigned list_count(struct list_head *head)
+{
+    unsigned count = 0;
+    for (struct list_head *node = head->next; node != head; node = node->next) {
+        assert(node->next->prev == node && node->prev->next == node);
+        assert(++count <= 20);
+    }
+    return count;
+}
+int main(void)
+{
+    struct amdgpu_vm vm = {.root_locked = true};
+    struct amdgpu_vm_bo_status *groups[] = {&vm.kernel, &vm.always_valid, &vm.individual};
+    struct amdgpu_bo objects[10] = {0};
+    struct amdgpu_bo_va mappings[10] = {0};
+    struct list_head ranges[10][3];
+    for (unsigned g = 0; g < 3; g++) {
+        list_init(&groups[g]->idle);
+        list_init(&groups[g]->needs_update);
+        list_init(&groups[g]->evicted);
+    }
+    vm.root.bo = &objects[9];
+    for (unsigned i = 0; i < 10; i++) {
+        struct amdgpu_bo_va *va = &mappings[i];
+        va->base.bo = &objects[i];
+        va->base.vm = &vm;
+        va->base.lists = groups[i == 9 ? 0 : i / 3];
+        list_init(&va->valids);
+        list_init(&va->invalids);
+        list_add(&ranges[i][0], &va->valids);
+        list_add(&ranges[i][1], &va->valids);
+        list_add(&ranges[i][2], &va->invalids);
+        struct amdgpu_vm_bo_status *group = va->base.lists;
+        struct list_head *state = i % 3 == 0 ? &group->idle :
+                                  i % 3 == 1 ? &group->needs_update : &group->evicted;
+        list_add(&va->base.vm_status, state);
+    }
+    for (unsigned pass = 0; pass < 2; pass++) {
+        /* A full rewrite is needed even if some mappings were already pending. */
+        amdgpu_vm_bo_reset_state_machine(&vm);
+        assert(!vm.individual_lock && vm.root_locked && !mappings[9].base.moved);
+        assert(list_count(&vm.kernel.idle) == 1 && vm.kernel.idle.next == &mappings[9].base.vm_status);
+        for (unsigned g = 0; g < 3; g++) {
+            assert(list_count(&groups[g]->needs_update) == 2);
+            assert(list_count(&groups[g]->evicted) == 1);
+            for (unsigned state = 0; state < 3; state++) {
+                struct amdgpu_bo_va *va = &mappings[g * 3 + state];
+                assert(va->base.moved == (state != 2));
+                if (state == 2)
+                    continue;
+                invalidate_mappings(va);
+                assert(list_count(&va->valids) == 0 && list_count(&va->invalids) == 3);
+                list_splice_init(&va->invalids, &va->valids);
+                va->base.moved = false;
+                list_move(&va->base.vm_status, &groups[g]->idle);
+            }
+        }
+    }
+    puts("VM reset: pending and idle mappings, root PD and repeated reset cases passed");
     return 0;
 }
 '''
