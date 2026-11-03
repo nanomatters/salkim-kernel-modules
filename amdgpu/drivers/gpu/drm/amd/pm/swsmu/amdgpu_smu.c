@@ -2540,7 +2540,12 @@ static int smu_handle_task(struct smu_context *smu,
 		ret = smu_adjust_power_state_dynamic(smu, level, false, false);
 		break;
 	case AMD_PP_TASK_COMPLETE_INIT:
-		ret = smu_adjust_power_state_dynamic(smu, level, true, false);
+		/*
+		 * PMFW is reinitialised by a reset, so program the retained
+		 * level again even though it matches the cached one.
+		 */
+		ret = smu_adjust_power_state_dynamic(smu, level, true,
+						    amdgpu_reset_in_recovery(smu->adev));
 		break;
 	case AMD_PP_TASK_READJUST_POWER_STATE:
 		ret = smu_adjust_power_state_dynamic(smu, level, true, false);

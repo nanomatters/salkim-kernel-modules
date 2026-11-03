@@ -142,3 +142,6 @@ drm/amdkfd: Credit pinned KFD memory.
 
 https://gitlab.freedesktop.org/drm/amdgpu/kernel/-/commit/9131cc85d0dedd8ba4cae60dbe5985d081551f30
 drm/amdkfd: Correct VRAM availability accounting.
+
+https://www.mail-archive.com/amd-gfx@lists.freedesktop.org/msg154795.html
+drm/amd/pm: Restore forced levels after reset.

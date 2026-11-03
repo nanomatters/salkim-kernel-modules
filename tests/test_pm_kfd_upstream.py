@@ -75,6 +75,11 @@ class PmKfdUpstreamTests(unittest.TestCase):
                                   ('amdgpu_bo_get_xcp', 'amdgpu_bo_pin', 'amdgpu_bo_unpin'))
         self.run_program(ACCOUNT_COMMON + PIN_COMMON + body + PIN_MAIN)
 
+    def test_forced_level_reset(self):
+        body = '\n'.join(self.function('pm/swsmu/amdgpu_smu.c', name) for name in
+                         ('smu_adjust_power_state_dynamic', 'smu_handle_task'))
+        self.run_program(PM_COMMON + FORCED_COMMON + body + FORCED_MAIN)
+
 
 PM_COMMON = r'''
 #include <assert.h>
@@ -579,6 +584,57 @@ int main(void)
     assert(adev.kfd.vram_used[0] == 64 * MiB);
     assert(!kfd_mem_limit.mem_limit_lock);
     amdgpu_bo_unpin(&bo[0]);
+    return 0;
+}
+"""
+
+
+
+FORCED_COMMON = r"""
+enum amd_pp_task { AMD_PP_TASK_DISPLAY_CONFIG_CHANGE, AMD_PP_TASK_COMPLETE_INIT,
+                   AMD_PP_TASK_READJUST_POWER_STATE };
+static int smu_display_config_changed(struct smu_context *s) { return 0; }
+static int smu_notify_smc_display_config(struct smu_context *s) { return 0; }
+static int smu_pre_display_config_changed(struct smu_context *s) { return 0; }
+static bool amdgpu_reset_in_recovery(struct amdgpu_device *a) { return a->recovery; }
+"""
+FORCED_MAIN = r"""
+int main(void)
+{
+    struct amdgpu_device adev = {0};
+    struct smu_context smu = { .adev = &adev, .pm_enabled = true };
+    adev.pm.dpm_enabled = true;
+    for (int level = AMD_DPM_FORCED_LEVEL_AUTO; level <= AMD_DPM_FORCED_LEVEL_PERF_DETERMINISM; level++) {
+        for (int task = AMD_PP_TASK_DISPLAY_CONFIG_CHANGE; task <= AMD_PP_TASK_READJUST_POWER_STATE; task++) {
+            for (int recovery = 0; recovery < 2; recovery++) {
+                clear_results();
+                adev.recovery = recovery;
+                smu.smu_dpm.dpm_level = level;
+                assert(!smu_handle_task(&smu, level, task));
+                assert(forced == (recovery && task == AMD_PP_TASK_COMPLETE_INIT));
+                assert(!clocks && !stable_on && !stable_off && !disabled && !fallbacks);
+                assert(smu.smu_dpm.dpm_level == level);
+            }
+        }
+    }
+    for (int error = 0; error < 2; error++) {
+        clear_results();
+        adev.recovery = true;
+        smu.smu_dpm.dpm_level = AMD_DPM_FORCED_LEVEL_HIGH;
+        if (error) force_error = -EIO; else rule_error = -EIO;
+        assert(smu_handle_task(&smu, AMD_DPM_FORCED_LEVEL_HIGH, AMD_PP_TASK_COMPLETE_INIT) == -EIO);
+        assert(smu.smu_dpm.dpm_level == AMD_DPM_FORCED_LEVEL_HIGH);
+        assert(!workload);
+    }
+    clear_results();
+    adev.recovery = false;
+    smu.smu_dpm.dpm_level = AMD_DPM_FORCED_LEVEL_AUTO;
+    assert(!smu_handle_task(&smu, AMD_DPM_FORCED_LEVEL_HIGH, AMD_PP_TASK_READJUST_POWER_STATE));
+    assert(forced == 1 && smu.smu_dpm.dpm_level == AMD_DPM_FORCED_LEVEL_HIGH);
+    clear_results();
+    smu.pm_enabled = false;
+    assert(smu_handle_task(&smu, AMD_DPM_FORCED_LEVEL_HIGH, AMD_PP_TASK_COMPLETE_INIT) == -EOPNOTSUPP);
+    assert(!forced);
     return 0;
 }
 """
