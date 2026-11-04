@@ -15,13 +15,25 @@ AMD = ROOT / 'amdgpu/drivers/gpu/drm/amd/amdgpu'
 
 class UserqFenceTests(unittest.TestCase):
     def test_implicit_ownership_and_explicit_waits(self):
-        source = (AMD / 'amdgpu_userq_fence.c').read_text()
+        revision = os.environ.get('USERQ_TEST_REVISION')
+        if revision:
+            source = subprocess.check_output(
+                ['git', '-C', str(ROOT), 'show',
+                 revision + ':' + str((AMD / 'amdgpu_userq_fence.c').relative_to(ROOT))],
+                text=True)
+        else:
+            source = (AMD / 'amdgpu_userq_fence.c').read_text()
         names = ('to_amdgpu_userq_fence', 'amdgpu_userq_fence_driver_alloc',
                  'amdgpu_userq_fence_is_same_client', 'amdgpu_userq_wait_count_fences',
-                 'amdgpu_userq_wait_add_fence', 'amdgpu_userq_wait_return_fence_info')
+                 'amdgpu_userq_wait_add_fence', 'amdgpu_userq_wait_return_fence_info',
+                 'amdgpu_userq_fence_driver_get', 'amdgpu_userq_fence_driver_put',
+                 'amdgpu_userq_walk_and_drop_fence_drv', 'amdgpu_userq_fence_driver_free',
+                 'amdgpu_userq_fence_put_fence_drv_array', 'amdgpu_userq_fence_alloc',
+                 'amdgpu_userq_fence_init', 'amdgpu_userq_fence_free',
+                 'amdgpu_userq_fence_release')
         functions = []
         for name in names:
-            match = re.search(r'^(?:static (?:inline )?)?(?:int|bool|struct \w+ \*)\s*'
+            match = re.search(r'^(?:static (?:inline )?)?(?:int|bool|void|struct \w+ \*)\s*'
                               + name + r'\(.*?^\}', source, re.M | re.S)
             self.assertIsNotNone(match, name)
             functions.append(match.group())
@@ -63,8 +75,10 @@ typedef int spinlock_t;
 struct kref { unsigned refs; };
 struct list_head { void *next, *prev; };
 struct dma_fence_ops { int unused; };
+struct rcu_head { int unused; };
 struct dma_fence {
     const struct dma_fence_ops *ops;
+    struct rcu_head rcu;
     u64 seqno, context;
     unsigned refs, waited;
     int error, wait_error, completion_error;
@@ -85,13 +99,25 @@ struct dma_fence_unwrap { struct dma_fence *chain; unsigned index; };
 struct drm_gem_object { struct dma_resv *resv; };
 struct drm_exec { int unused; };
 struct xarray { struct amdgpu_userq_fence_driver *entries[8]; unsigned count; };
-struct amdgpu_usermode_queue { int fence_drv_lock; struct xarray fence_drv_xa; unsigned refs; };
+struct amdgpu_usermode_queue {
+    int fence_drv_lock;
+    struct xarray fence_drv_xa;
+    unsigned refs;
+    struct amdgpu_userq_fence_driver *fence_drv;
+    struct dma_fence *last_fence;
+};
 static struct amdgpu_usermode_queue queue;
 static const struct dma_fence_ops amdgpu_userq_fence_ops, kernel_ops, wrapper_ops;
 static struct dma_fence *syncobjs[2];
 static bool locked;
 static unsigned cases;
 static u64 seq64_word;
+static int xa_fail_after = -1;
+static unsigned drivers_destroyed, fences_released, consumed;
+static void (*after_unlock)(void);
+static void amdgpu_userq_fence_release(struct dma_fence *f);
+void amdgpu_userq_fence_driver_get(struct amdgpu_userq_fence_driver *drv);
+void amdgpu_userq_fence_driver_put(struct amdgpu_userq_fence_driver *drv);
 #define GFP_KERNEL 0
 #define DRM_EXEC_INTERRUPTIBLE_WAIT 1
 #define DRM_EXEC_IGNORE_DUPLICATES 2
@@ -101,6 +127,23 @@ static u64 seq64_word;
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define kzalloc_obj(obj) calloc(1, sizeof(obj))
 #define kfree free
+#define kvfree free
+#define kmalloc_obj(obj) malloc(sizeof(obj))
+#define kvmalloc_objs(obj, count) calloc((count) ? (count) : 1, sizeof(obj))
+#define spin_lock_irqsave(p, flags) do { (flags) = 0; assert(!*(p)); *(p) = 1; } while (0)
+#define spin_unlock_irqrestore(p, flags) do { (void)(flags); assert(*(p)); *(p) = 0; } while (0)
+#define lockdep_assert_held(p) assert(*(p))
+#define list_add_tail(entry, list) assert(!"unexpected pending fence")
+#define rcu_read_lock() ((void)0)
+#define rcu_read_unlock() ((void)0)
+#define XA_FREE_MARK 0
+#define XA_PRESENT 0
+#define XA_STATE(name, array, index) struct xa_state name = {(array), (index)}
+#define xa_for_each(xa, i, entry) \
+    for ((i) = 0; (i) < (xa)->count && ((entry) = (xa)->entries[i]); (i)++)
+#define xa_lock(xa) ((void)0)
+#define xa_unlock(xa) ((void)0)
+struct xa_state { struct xarray *xa; unsigned long xa_index; };
 #define INIT_LIST_HEAD(p) ((void)(p))
 #define spin_lock_init(p) (*(p) = 0)
 #define get_task_comm(dst, task) strcpy(dst, "test")
@@ -115,13 +158,48 @@ static u64 seq64_word;
 #define xa_limit_32b 0
 #define u64_to_user_ptr(p) ((void *)(uintptr_t)(p))
 static void kref_init(struct kref *ref) { ref->refs = 1; }
+static void kref_get(struct kref *ref) { assert(ref->refs); ref->refs++; }
+static void kref_put(struct kref *ref, void (*release)(struct kref *))
+{ assert(ref->refs); if (!--ref->refs) release(ref); }
+static void amdgpu_userq_fence_driver_destroy(struct kref *ref)
+{
+    drivers_destroyed++;
+    free(container_of(ref, struct amdgpu_userq_fence_driver, refcount));
+}
+static void call_rcu(struct rcu_head *rcu, void (*release)(struct rcu_head *))
+{ fences_released++; release(rcu); }
+static void dma_fence_init64(struct dma_fence *f, const struct dma_fence_ops *ops,
+                             spinlock_t *lock, u64 context, u64 seqno)
+{ *f = (struct dma_fence){.ops = ops, .context = context, .seqno = seqno, .refs = 1}; }
+static bool dma_fence_is_signaled(struct dma_fence *f)
+{ return f->signaled = (seq64_word >= f->seqno); }
+static void amdgpu_userq_start_hang_detect_work(struct amdgpu_usermode_queue *q)
+{ assert(!"unexpected pending fence"); }
+static bool xa_empty(struct xarray *xa) { return !xa->count; }
+static void __xa_erase(struct xarray *xa, unsigned long index) { xa->entries[index] = NULL; }
+static void xa_destroy(struct xarray *xa) { memset(xa, 0, sizeof(*xa)); }
+static void *xas_find_marked(struct xa_state *xas, unsigned long max, unsigned mark)
+{ xas->xa_index = xas->xa->count; return NULL; }
+static bool xas_retry(struct xa_state *xas, void *entry) { return false; }
+static void xa_extract(struct xarray *xa, void **out, unsigned long first,
+                        unsigned long last, unsigned count, unsigned mark)
+{ assert(count == xa->count); memcpy(out, xa->entries, count * sizeof(*out)); }
+static void mutex_destroy(int *m) { assert(!*m); }
 static u64 dma_fence_context_alloc(unsigned count) { static u64 context; return context += count; }
 static int amdgpu_seq64_alloc(struct amdgpu_device *dev, u64 *va, u64 *gpu, u64 **cpu)
 { *va = 0x1000; *gpu = 0x2000; *cpu = &seq64_word; return 0; }
 static void *kmalloc_array(size_t count, size_t size, int flags)
 { void *p = calloc(count ? count : 1, size); assert(p); return p; }
 static struct dma_fence *dma_fence_get(struct dma_fence *f) { assert(f->refs); f->refs++; return f; }
-static void dma_fence_put(struct dma_fence *f) { assert(f->refs > 1); f->refs--; }
+static void dma_fence_put(struct dma_fence *f)
+{
+    if (!f) return;
+    assert(f->refs);
+    if (!--f->refs) {
+        assert(f->ops == &amdgpu_userq_fence_ops);
+        amdgpu_userq_fence_release(f);
+    }
+}
 static int dma_fence_get_status(struct dma_fence *f)
 { return f->signaled ? (f->error ? f->error : 1) : 0; }
 static int dma_fence_wait(struct dma_fence *f, bool interruptible)
@@ -185,17 +263,28 @@ static struct amdgpu_usermode_queue *amdgpu_userq_get(struct amdgpu_userq_mgr *m
 { assert(!locked && id == 7); queue.refs++; return &queue; }
 static void amdgpu_userq_put(struct amdgpu_usermode_queue *q) { assert(q->refs); q->refs--; }
 static void mutex_lock(int *m) { assert(!*m); *m = 1; }
-static void mutex_unlock(int *m) { assert(*m); *m = 0; }
+static void mutex_unlock(int *m)
+{
+    assert(*m);
+    *m = 0;
+    if (m == &queue.fence_drv_lock && after_unlock) {
+        void (*run)(void) = after_unlock;
+        after_unlock = NULL;
+        run();
+    }
+}
 static int xa_alloc(struct xarray *xa, u32 *index, struct amdgpu_userq_fence_driver *drv,
                     unsigned limit, int flags)
 {
     assert(queue.fence_drv_lock && xa->count < 8);
+    if (xa_fail_after == 0)
+        return -ENOMEM;
+    if (xa_fail_after > 0)
+        xa_fail_after--;
     *index = xa->count;
     xa->entries[xa->count++] = drv;
     return 0;
 }
-static void amdgpu_userq_fence_driver_get(struct amdgpu_userq_fence_driver *drv)
-{ drv->refcount.refs++; }
 static int copy_to_user(void *dst, const void *src, size_t size)
 { assert(!locked); memcpy(dst, src, size); return 0; }
 ACTUAL_FUNCTIONS
@@ -353,6 +442,137 @@ static void check_mixed_dependencies(struct drm_file *file,
     }
 }
 
+
+/* Run SIGNAL allocation and already-complete initialization at WAIT's unlock. */
+static void consume_at_unlock(void)
+{
+    struct amdgpu_userq_fence *fence;
+    unsigned destroyed = drivers_destroyed;
+    unsigned entries = queue.fence_drv_xa.count;
+    assert(entries && !queue.fence_drv_lock && !after_unlock);
+    assert(amdgpu_userq_fence_alloc(&queue, &fence) == 0);
+    assert(fence->fence_drv_array_count == entries && !queue.fence_drv_xa.count);
+    amdgpu_userq_fence_init(&queue, fence, 50);
+    assert(fence->base.signaled && !fence->fence_drv_array_count);
+    /* A retained exported source fence must still own a live driver. */
+    assert(drivers_destroyed == destroyed);
+    dma_fence_put(queue.last_fence);
+    queue.last_fence = NULL;
+    dma_fence_put(&fence->base);
+    consumed += entries;
+}
+
+static void check_reference_publication(struct drm_file *file)
+{
+    struct amdgpu_device adev = {0};
+    struct drm_device dev = {0};
+    struct amdgpu_usermode_queue producer = {0};
+    struct amdgpu_userq_fence *source;
+    struct drm_amdgpu_userq_fence_info out[3] = {{0}};
+    struct drm_amdgpu_userq_wait wait = {
+        .waitq_id = 7, .num_fences = 3, .num_syncobj_handles = 1,
+        .out_fences = (uintptr_t)out,
+    };
+    u32 handle = 0;
+    unsigned destroyed = drivers_destroyed, released = fences_released;
+    assert(amdgpu_userq_fence_driver_alloc(&adev, file->client_id, &producer.fence_drv) == 0);
+    assert(amdgpu_userq_fence_driver_alloc(&adev, file->client_id, &queue.fence_drv) == 0);
+    assert(amdgpu_userq_fence_alloc(&producer, &source) == 0);
+    seq64_word = 100;
+    amdgpu_userq_fence_init(&producer, source, 10);
+    assert(source->base.signaled && source->base.refs == 2);
+    assert(source->fence_drv->refcount.refs == 2);
+    /* Destroy the producer queue while its completed syncobj fence survives. */
+    amdgpu_userq_fence_driver_free(&producer);
+    assert(source->base.refs == 1 && source->fence_drv->refcount.refs == 1);
+    syncobjs[0] = &source->base;
+    after_unlock = consume_at_unlock;
+    assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, &handle,
+                                               NULL, NULL, NULL, NULL) == 0);
+    assert(!after_unlock && consumed == 1 && !queue.fence_drv_xa.count);
+    assert(out[0].va == source->fence_drv->va && out[0].value == 10);
+    assert(source->base.refs == 1 && source->fence_drv->refcount.refs == 1);
+    assert(!queue.refs && !queue.fence_drv_lock);
+    cases++;
+
+    /* Separate WAITs may retain the same driver more than once. */
+    for (unsigned i = 0; i < 2; i++) {
+        wait.num_fences = 3;
+        assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, &handle,
+                                                   NULL, NULL, NULL, NULL) == 0);
+        assert(queue.fence_drv_xa.count == i + 1);
+        assert(source->fence_drv->refcount.refs == i + 2);
+    }
+    consume_at_unlock();
+    assert(source->fence_drv->refcount.refs == 1 && consumed == 3);
+    cases++;
+
+    /* Repeated source fences in one WAIT are deduplicated before publication. */
+    struct dma_fence wrapper = {
+        .ops = &wrapper_ops, .refs = 1,
+        .children = {&source->base, &source->base}, .child_count = 2,
+    };
+    u64 point = UINT64_C(0x100000001);
+    handle = 1;
+    syncobjs[1] = &wrapper;
+    wait.num_syncobj_handles = 0;
+    wait.num_syncobj_timeline_handles = 1;
+    wait.num_fences = 3;
+    assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, NULL,
+                                               &point, &handle, NULL, NULL) == 0);
+    assert(wait.num_fences == 1 && queue.fence_drv_xa.count == 1);
+    assert(source->base.refs == 1 && wrapper.refs == 1);
+    assert(source->fence_drv->refcount.refs == 2);
+    consume_at_unlock();
+    assert(source->fence_drv->refcount.refs == 1 && consumed == 4);
+    cases++;
+
+    /* A failed insertion owns nothing, including after an earlier success. */
+    struct amdgpu_usermode_queue second_producer = {0};
+    struct amdgpu_userq_fence *second;
+    assert(amdgpu_userq_fence_driver_alloc(&adev, file->client_id,
+                                          &second_producer.fence_drv) == 0);
+    assert(amdgpu_userq_fence_alloc(&second_producer, &second) == 0);
+    seq64_word = 100;
+    amdgpu_userq_fence_init(&second_producer, second, 20);
+    amdgpu_userq_fence_driver_free(&second_producer);
+    wrapper.children[1] = &second->base;
+    for (unsigned successes = 0; successes <= 1; successes++) {
+        xa_fail_after = successes;
+        wait.num_fences = 3;
+        assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, NULL,
+                                                   &point, &handle, NULL, NULL) == -ENOMEM);
+        assert(queue.fence_drv_xa.count == successes);
+        assert(source->fence_drv->refcount.refs == 1 + successes);
+        assert(second->fence_drv->refcount.refs == 1);
+        assert(source->base.refs == 1 && second->base.refs == 1 && wrapper.refs == 1);
+        assert(!locked && !queue.refs && !queue.fence_drv_lock);
+        xa_fail_after = -1;
+        if (successes)
+            consume_at_unlock();
+        assert(source->fence_drv->refcount.refs == 1);
+        cases++;
+    }
+    dma_fence_put(&second->base);
+    assert(drivers_destroyed == destroyed + 1);
+
+    /* Queue teardown also balances duplicate dependencies without a SIGNAL. */
+    wrapper.children[1] = &source->base;
+    for (unsigned i = 0; i < 2; i++) {
+        wait.num_fences = 3;
+        assert(amdgpu_userq_wait_return_fence_info(&dev, file, &wait, NULL,
+                                                   &point, &handle, NULL, NULL) == 0);
+    }
+    assert(source->fence_drv->refcount.refs == 3);
+    amdgpu_userq_fence_driver_free(&queue);
+    assert(source->fence_drv->refcount.refs == 1);
+    dma_fence_put(&source->base);
+    assert(drivers_destroyed == destroyed + 3 && fences_released == released + 6);
+    queue.fence_drv = NULL;
+    seq64_word = 0;
+    cases++;
+}
+
 int main(void)
 {
     struct amdgpu_device dev = {0};
@@ -449,6 +669,7 @@ int main(void)
         queue.fence_drv_xa.count = 0;
         cases++;
     }
+    check_reference_publication(&file);
     check_failed_dependencies(&file);
     check_mixed_dependencies(&file, other);
     /* An exported fence keeps its original identity after the DRM file is replaced. */

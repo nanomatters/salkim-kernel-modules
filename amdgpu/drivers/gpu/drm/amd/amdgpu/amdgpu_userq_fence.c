@@ -987,11 +987,12 @@ amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *fil
 		mutex_lock(&waitq->fence_drv_lock);
 		r = xa_alloc(&waitq->fence_drv_xa, &index, fence_drv,
 			     xa_limit_32b, GFP_KERNEL);
+		/* SIGNAL can consume the entry as soon as we drop the lock. */
+		if (!r)
+			amdgpu_userq_fence_driver_get(fence_drv);
 		mutex_unlock(&waitq->fence_drv_lock);
 		if (r)
 			goto put_waitq;
-
-		amdgpu_userq_fence_driver_get(fence_drv);
 
 		trace_amdgpu_userq_wait_deps(dev->dev, waitq, userq_fence);
 
