@@ -105,7 +105,8 @@ struct amdgpu_vm {
 struct amdgpu_device { bool debug_vm; };
 struct xarray { void *values[4]; };
 struct amdgpu_userq_mgr { struct amdgpu_device *adev; struct xarray userq_xa; };
-struct amdgpu_usermode_queue { struct { struct amdgpu_bo *obj; uint64_t gpu_addr; } wptr_obj; };
+struct amdgpu_usermode_queue { struct { struct amdgpu_bo *obj; uint64_t gpu_addr; } wptr_obj;
+                              uint64_t wptr_bo_offset; };
 struct amdgpu_fpriv { struct amdgpu_userq_mgr userq_mgr; struct amdgpu_vm vm; struct amdgpu_bo_va *prt_va; int evf_mgr; };
 struct amdgpu_hmm_range { struct amdgpu_bo *bo; };
 struct ttm_operation_ctx { bool interruptible, no_wait_gpu; };
@@ -138,6 +139,7 @@ static struct amdgpu_bo_va prt;
 static struct amdgpu_device device;
 static bool move_during_validation;
 static unsigned restored, updates, unlocks;
+static uint64_t bo_mc_base;
 static int update_error, validation_error;
 
 static void spin_lock(int *lock) { assert(!*lock); *lock = 1; }
@@ -227,9 +229,17 @@ static int amdgpu_userq_validate_vm(void *data, struct amdgpu_bo *bo) { return 0
 static int amdgpu_vm_update_pdes(struct amdgpu_device *adev, struct amdgpu_vm *vm, bool immediate) { return 0; }
 static int dma_fence_wait(void *fence, bool interruptible) { return 0; }
 static int amdgpu_ttm_alloc_gart(struct ttm_buffer_object *bo) { return 0; }
-static uint64_t amdgpu_bo_gpu_offset(struct amdgpu_bo *bo) { return 0x100000; }
+static uint64_t amdgpu_bo_gpu_offset(struct amdgpu_bo *bo) { return bo_mc_base; }
 static int amdgpu_evf_mgr_rearm(int *manager, struct drm_exec *exec) { return 0; }
-static int amdgpu_userq_restore_all(struct amdgpu_userq_mgr *manager) { restored++; return 0; }
+static int amdgpu_userq_restore_all(struct amdgpu_userq_mgr *manager)
+{
+    struct amdgpu_usermode_queue *queue;
+    unsigned long index;
+    xa_for_each(&manager->userq_xa, index, queue)
+        assert(queue->wptr_obj.gpu_addr == bo_mc_base + queue->wptr_bo_offset);
+    restored++;
+    return 0;
+}
 
 ACTUAL_VALIDATE
 
@@ -256,11 +266,31 @@ static void setup(void)
     list_add(&target_va.base.vm_status, &fpriv.vm.individual.idle);
     move_during_validation = false;
     updates = restored = unlocks = 0;
+    bo_mc_base = 0x100000;
     update_error = validation_error = 0;
 }
 
 int main(void)
 {
+    const uint64_t offsets[] = {0, 8, 4096 - sizeof(uint64_t), 65536 - sizeof(uint64_t)};
+    for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+        setup();
+        struct amdgpu_usermode_queue moved = {
+            .wptr_obj = {.obj = &target_bo, .gpu_addr = bo_mc_base + offsets[i]},
+            .wptr_bo_offset = offsets[i],
+        };
+        fpriv.userq_mgr.userq_xa.values[0] = &moved;
+        for (unsigned move = 0; move < 2; move++) {
+            bo_mc_base += 0x100000;
+            target_resource.mem_type = TTM_PL_SYSTEM;
+            assert(amdgpu_userq_vm_validate_and_restore_queue(&fpriv.userq_mgr) == 0);
+            assert(moved.wptr_bo_offset == offsets[i]);
+            assert(moved.wptr_obj.gpu_addr == bo_mc_base + offsets[i]);
+            assert(restored == move + 1 && !target_resv.owner);
+        }
+    }
+    puts("UserQ restore: zero/nonzero WPTR offsets preserved across repeated BO moves");
+
     setup();
     struct amdgpu_usermode_queue queue = {.wptr_obj.obj = &target_bo};
     fpriv.userq_mgr.userq_xa.values[0] = &queue;

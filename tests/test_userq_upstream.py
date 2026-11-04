@@ -59,7 +59,10 @@ class UserqUpstreamTests(unittest.TestCase):
     def test_wptr_buffers(self):
         body = self.function('amdgpu_userq_fence.c', 'amdgpu_userq_fence_read_wptr')
         body += '\n' + self.function('mes_userqueue.c', 'mes_userq_create_wptr_mapping')
-        self.run_program(WPTR_HARNESS.replace('ACTUAL_WPTR', body))
+        source = WPTR_HARNESS.replace('ACTUAL_WPTR', body)
+        for page_size in (4096, 65536):
+            with self.subTest(page_size=page_size):
+                self.run_program(source.replace('TEST_PAGE_SIZE', str(page_size)))
 
 
     def test_firmware_copy_errors(self):
@@ -237,7 +240,8 @@ WPTR_HARNESS = r'''
 #include <stdio.h>
 typedef uint64_t u64;
 #define AMDGPU_GPU_PAGE_SHIFT 12
-#define PAGE_SIZE 4096
+#define PAGE_SIZE TEST_PAGE_SIZE
+#define check_add_overflow(a, b, result) __builtin_add_overflow(a, b, result)
 #define TTM_NUM_MOVE_FENCES 2
 #define AMDGPU_GMC_HOLE_MASK 0x0000ffffffffffffULL
 #define DRM_EXEC_IGNORE_DUPLICATES 1
@@ -248,14 +252,14 @@ typedef uint64_t u64;
 #define drm_exec_retry_on_contention(e) ((void)0)
 struct drm_exec { int unused; };
 struct gem_object { size_t size; bool imported; };
-struct amdgpu_bo { struct { struct gem_object base; } tbo; uint64_t words[1024]; unsigned refs; };
+struct amdgpu_bo { struct { struct gem_object base; } tbo; uint64_t words[PAGE_SIZE / sizeof(u64) + 512]; unsigned refs; };
 struct amdgpu_bo_va { struct { struct amdgpu_bo *bo; } base; };
 struct amdgpu_bo_va_mapping { u64 start, last, offset; struct amdgpu_bo_va *bo_va; };
 struct amdgpu_vm { struct amdgpu_bo_va_mapping *mapping; };
 struct amdgpu_userq_obj { struct amdgpu_bo *obj; u64 gpu_addr; };
 struct userq_props { u64 wptr_gpu_addr; };
 struct amdgpu_usermode_queue { struct amdgpu_vm *vm; struct userq_props *userq_prop;
-                              struct amdgpu_userq_obj wptr_obj; };
+                              struct amdgpu_userq_obj wptr_obj; u64 wptr_bo_offset; };
 struct amdgpu_userq_mgr { int evf_mgr; };
 struct amdgpu_device { int unused; };
 static int pd_error, bo_error, map_error, attach_error, gart_error;
@@ -296,7 +300,7 @@ int main(void)
     struct amdgpu_vm vm = {.mapping = &mapping};
     struct userq_props props = {0};
     struct amdgpu_usermode_queue queue = {.vm = &vm, .userq_prop = &props};
-    for (unsigned i = 0; i < 1024; ++i)
+    for (unsigned i = 0; i < sizeof(bo.words) / sizeof(bo.words[0]); ++i)
         bo.words[i] = 0x1000000000000000ULL + i;
     u64 result = 0;
     unsigned cases = 0;
@@ -333,7 +337,27 @@ int main(void)
     mapping.offset = 0;
     bo.tbo.base.size = PAGE_SIZE;
     struct amdgpu_userq_mgr mgr = {0};
-    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == 0);
+    unsigned mc_cases = 0;
+    /* GPU pages stay 4 KiB, including hosts with 64 KiB CPU pages. */
+    for (u64 mapping_offset = 0; mapping_offset < PAGE_SIZE; mapping_offset += 4096) {
+        mapping.offset = mapping_offset;
+        mapping.last = (base + PAGE_SIZE - mapping_offset - 1) >> AMDGPU_GPU_PAGE_SHIFT;
+        for (u64 offset = 0; offset < PAGE_SIZE - mapping_offset; offset += sizeof(u64)) {
+            props.wptr_gpu_addr = base + offset;
+            assert(amdgpu_userq_fence_read_wptr(&adev, &queue, &result) == 0);
+            assert(result == bo.words[(mapping_offset + offset) / sizeof(u64)]);
+            assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, props.wptr_gpu_addr) == 0);
+            assert(queue.wptr_obj.obj == &bo && bo.refs == 1);
+            assert(queue.wptr_obj.gpu_addr == 0x2000000 + mapping_offset + offset);
+            assert(queue.wptr_bo_offset == mapping_offset + offset);
+            amdgpu_bo_unref(&queue.wptr_obj.obj);
+            mc_cases++;
+        }
+    }
+    mapping.offset = 0;
+    mapping.last = (base + PAGE_SIZE - 1) >> AMDGPU_GPU_PAGE_SHIFT;
+    props.wptr_gpu_addr = base | 0xffff000000000000ULL;
+    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, props.wptr_gpu_addr) == 0);
     assert(queue.wptr_obj.obj == &bo && bo.refs == 1);
     assert(queue.wptr_obj.gpu_addr == 0x2000000);
     struct amdgpu_bo imported = {.tbo.base = {.size = PAGE_SIZE, .imported = true}};
@@ -350,6 +374,28 @@ int main(void)
     assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == -EINVAL);
     assert(bo.refs == 0);
     bo.tbo.base.size = PAGE_SIZE;
+    /* Reject incomplete/overflowed BO spans before attaching or binding. */
+    struct { u64 size, mapping_offset, offset; } invalid[] = {
+        {0, 0, 0}, {sizeof(u64) - 1, 0, 0},
+        {PAGE_SIZE, 0, PAGE_SIZE - sizeof(u64) + 1},
+        {PAGE_SIZE, PAGE_SIZE, 0}, {PAGE_SIZE, PAGE_SIZE - 4, 0},
+        {PAGE_SIZE, UINT64_MAX - 7, 8},
+    };
+    old_attached = attached;
+    old_gart = gart;
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        bo.tbo.base.size = invalid[i].size;
+        mapping.offset = invalid[i].mapping_offset;
+        assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base + invalid[i].offset) == -EINVAL);
+        assert(!bo.refs && !queue.wptr_obj.obj);
+    }
+    bo.tbo.base.size = PAGE_SIZE;
+    mapping.offset = 0;
+    mapping.last = mapping.start;
+    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base + 4096 - 4) == -EINVAL);
+    assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base + 4096) == -EINVAL);
+    assert(!bo.refs && !queue.wptr_obj.obj && attached == old_attached && gart == old_gart);
+    mapping.last = (base + PAGE_SIZE - 1) >> AMDGPU_GPU_PAGE_SHIFT;
     attach_error = -ENOMEM;
     assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == -ENOMEM);
     assert(bo.refs == 0);
@@ -357,7 +403,8 @@ int main(void)
     gart_error = -EIO;
     assert(mes_userq_create_wptr_mapping(&adev, &mgr, &queue, base) == -EIO);
     assert(bo.refs == 0);
-    printf("UserQ WPTR: %u offsets, imported buffers and mapping failures passed\n", cases);
+    printf("UserQ WPTR: %u CPU offsets, %u MC offsets, bounds and failures passed (page size %u)\n",
+           cases, mc_cases, PAGE_SIZE);
     return 0;
 }
 '''

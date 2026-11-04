@@ -22,6 +22,7 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  *
  */
+#include <linux/overflow.h>
 #include <drm/drm_drv.h>
 #include "amdgpu.h"
 #include "amdgpu_gfx.h"
@@ -43,6 +44,7 @@ mes_userq_create_wptr_mapping(struct amdgpu_device *adev,
 	struct amdgpu_bo *obj;
 	struct amdgpu_vm *vm = queue->vm;
 	struct drm_exec exec;
+	u64 offset;
 	int ret;
 
 	wptr &= AMDGPU_GMC_HOLE_MASK;
@@ -74,7 +76,13 @@ mes_userq_create_wptr_mapping(struct amdgpu_device *adev,
 	}
 
 	wptr_obj->obj = amdgpu_bo_ref(wptr_mapping->bo_va->base.bo);
-	if (wptr_obj->obj->tbo.base.size > PAGE_SIZE) {
+	offset = wptr - (wptr_mapping->start << AMDGPU_GPU_PAGE_SHIFT);
+	/* The full WPTR must fit both its VA mapping and its backing BO. */
+	if (wptr_obj->obj->tbo.base.size > PAGE_SIZE ||
+	    ((wptr + sizeof(u64) - 1) >> AMDGPU_GPU_PAGE_SHIFT) > wptr_mapping->last ||
+	    check_add_overflow(offset, wptr_mapping->offset, &offset) ||
+	    offset > wptr_obj->obj->tbo.base.size ||
+	    wptr_obj->obj->tbo.base.size - offset < sizeof(u64)) {
 		ret = -EINVAL;
 		goto fail_map;
 	}
@@ -91,7 +99,8 @@ mes_userq_create_wptr_mapping(struct amdgpu_device *adev,
 		goto fail_map;
 	}
 
-	queue->wptr_obj.gpu_addr = amdgpu_bo_gpu_offset(wptr_obj->obj);
+	queue->wptr_bo_offset = offset;
+	wptr_obj->gpu_addr = amdgpu_bo_gpu_offset(wptr_obj->obj) + offset;
 
 	drm_exec_fini(&exec);
 	return 0;

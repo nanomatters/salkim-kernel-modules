@@ -65,6 +65,8 @@ struct amdgpu_usermode_queue {
 	struct amdgpu_userq_obj	db_obj;
 	struct amdgpu_userq_obj fw_obj;
 	struct amdgpu_userq_obj wptr_obj;
+	/* Byte offset within wptr_obj.obj, retained when the BO moves. */
+	u64			wptr_bo_offset;
 
 	/**
 	 * @fence_drv_lock: Protecting @fence_drv_xa.
