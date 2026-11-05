@@ -1786,31 +1786,31 @@ static void dm_test_dmub_sw_init_asic_mapping(struct kunit *test)
 }
 
 /**
- * dm_test_dmub_sw_init_gtt_only_asic - Test the GTT-only memory domain
+ * dm_test_dmub_sw_init_memory_domains - Test the DMUB framebuffer domains
  * @test: The KUnit test context
- *
- * DCN32 and DCN321 keep the DMUB framebuffer in GTT. Every other ASIC also
- * allows VRAM.
  */
-static void dm_test_dmub_sw_init_gtt_only_asic(struct kunit *test)
+static void dm_test_dmub_sw_init_memory_domains(struct kunit *test)
 {
+	static const u32 ip_versions[] = {
+		IP_VERSION(3, 2, 0),
+		IP_VERSION(3, 2, 1),
+		IP_VERSION(3, 5, 0),
+	};
 	struct amdgpu_device *adev = dm_test_alloc_adev_for_sw_init(test);
+	unsigned int i;
 
-	adev->ip_versions[DCE_HWIP][0] = IP_VERSION(3, 2, 0);
 	dm_test_bo.create_ret = -ENOMEM;
 
-	KUNIT_EXPECT_EQ(test, dm_dmub_sw_init(adev), -ENOMEM);
-	KUNIT_EXPECT_EQ(test, dm_test_bo.create_domain, (u32)AMDGPU_GEM_DOMAIN_GTT);
+	for (i = 0; i < ARRAY_SIZE(ip_versions); i++) {
+		adev->ip_versions[DCE_HWIP][0] = ip_versions[i];
 
-	dm_test_free_sw_init(adev);
+		KUNIT_EXPECT_EQ(test, dm_dmub_sw_init(adev), -ENOMEM);
+		KUNIT_EXPECT_EQ_MSG(test, dm_test_bo.create_domain,
+				   (u32)(AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT),
+				   "IP version 0x%08x", ip_versions[i]);
 
-	adev->ip_versions[DCE_HWIP][0] = IP_VERSION(3, 5, 0);
-
-	KUNIT_EXPECT_EQ(test, dm_dmub_sw_init(adev), -ENOMEM);
-	KUNIT_EXPECT_EQ(test, dm_test_bo.create_domain,
-			(u32)(AMDGPU_GEM_DOMAIN_GTT | AMDGPU_GEM_DOMAIN_VRAM));
-
-	dm_test_free_sw_init(adev);
+		dm_test_free_sw_init(adev);
+	}
 }
 
 /**
@@ -1969,7 +1969,7 @@ static struct kunit_case amdgpu_dm_dmub_hw_access_tests[] = {
 	KUNIT_CASE(dm_test_init_microcode_request_fails),
 	/* dm_dmub_sw_init() */
 	KUNIT_CASE(dm_test_dmub_sw_init_asic_mapping),
-	KUNIT_CASE(dm_test_dmub_sw_init_gtt_only_asic),
+	KUNIT_CASE(dm_test_dmub_sw_init_memory_domains),
 	KUNIT_CASE(dm_test_dmub_sw_init_success),
 	KUNIT_CASE(dm_test_dmub_sw_init_bss_data),
 	KUNIT_CASE(dm_test_dmub_sw_init_psp_load),
