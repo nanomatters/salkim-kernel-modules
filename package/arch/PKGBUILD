@@ -1,22 +1,18 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Maintainer: Erhan Bilgili
 
-pkgname=salkim-kernel-modules-dkms
-pkgver=r45.g8a3ac3835b0c
+pkgbase=salkim-kernel-modules
+pkgname=(ntsync-iocp-dkms amdgpu-salkim-dkms)
+pkgver=r215.g06d820ab1d8c
 pkgrel=1
 pkgdesc='Salkim ntsync IOCP and Linux 7.3 AMDGPU kernel modules'
 arch=(any)
 url='https://github.com/nanomatters/ntsync-iocp'
 license=(GPL-2.0-only
-         'GPL-2.0-only WITH Linux-syscall-note'
-         MIT)
+         'GPL-2.0-only WITH Linux-syscall-note')
 depends=(dkms)
-optdepends=('mkinitcpio: refresh existing initramfs images containing AMDGPU')
 makedepends=(git rsync)
-provides=(NTSYNC-MODULE "ntsync-iocp-dkms=$pkgver")
-conflicts=(ntsync-iocp-dkms amdgpu-dkms)
-replaces=(ntsync-iocp-dkms)
-install=salkim-kernel-modules.install
+conflicts=(salkim-kernel-modules-dkms)
 _source_dir="$startdir/../.."
 source=()
 sha256sums=()
@@ -27,7 +23,10 @@ pkgver() {
     "$(git -C "$_source_dir" rev-parse --short=12 HEAD)"
 }
 
-package() {
+package_ntsync-iocp-dkms() {
+  pkgdesc='Salkim ntsync kernel module with IOCP support'
+  provides=(NTSYNC-MODULE)
+
   local dkms_source="$pkgdir/usr/src/ntsync-iocp-$pkgver"
 
   install -Dm644 "$_source_dir/Makefile" "$dkms_source/Makefile"
@@ -45,7 +44,30 @@ package() {
     'AUTOINSTALL="yes"' \
     > "$dkms_source/dkms.conf"
 
-  dkms_source="$pkgdir/usr/src/amdgpu-salkim-$pkgver"
+  install -Dm644 "$_source_dir/amdgpu/LICENSES/preferred/GPL-2.0" \
+    "$pkgdir/usr/share/licenses/$pkgname/GPL-2.0"
+  install -Dm644 "$_source_dir/amdgpu/LICENSES/exceptions/Linux-syscall-note" \
+    "$pkgdir/usr/share/licenses/$pkgname/Linux-syscall-note"
+  install -Dm644 "$_source_dir/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$_source_dir/README.md" \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$_source_dir/Documentation/ntsync.rst" \
+    "$pkgdir/usr/share/doc/$pkgname/ntsync.rst"
+  install -Dm644 "$_source_dir/Documentation/iocp.rst" \
+    "$pkgdir/usr/share/doc/$pkgname/iocp.rst"
+}
+
+package_amdgpu-salkim-dkms() {
+  pkgdesc='Salkim AMDGPU kernel module for Linux 7.3.x'
+  license=(GPL-2.0-only
+           'GPL-2.0-only WITH Linux-syscall-note'
+           MIT)
+  optdepends=('mkinitcpio: refresh existing initramfs images containing AMDGPU')
+  conflicts=(salkim-kernel-modules-dkms amdgpu-dkms)
+  install=salkim-kernel-modules.install
+
+  local dkms_source="$pkgdir/usr/src/amdgpu-salkim-$pkgver"
   install -d "$dkms_source"
   rsync -a --exclude='*.o' --exclude='*.ko' --exclude='*.cmd' \
     --exclude='*.mod' --exclude='*.mod.c' --exclude=Module.symvers \
@@ -69,8 +91,4 @@ package() {
 
   install -Dm644 "$_source_dir/README.md" \
     "$pkgdir/usr/share/doc/$pkgname/README.md"
-  install -Dm644 "$_source_dir/Documentation/ntsync.rst" \
-    "$pkgdir/usr/share/doc/$pkgname/ntsync.rst"
-  install -Dm644 "$_source_dir/Documentation/iocp.rst" \
-    "$pkgdir/usr/share/doc/$pkgname/iocp.rst"
 }

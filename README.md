@@ -1,7 +1,7 @@
 # Salkim kernel modules
 
-One DKMS package provides ntsync with IOCP support and a modified AMDGPU driver
-for Linux 7.3.x.
+Two independently installable DKMS packages provide ntsync with IOCP support
+and a modified AMDGPU driver for Linux 7.3.x.
 
 The AMDGPU source starts from upstream Linux 7.3 and carries the driver contained
 Salkim VM fixes, sparse mapping optimisations and independent display fixes,
@@ -39,7 +39,7 @@ generation based removal abandonment, terminal cancellation, depth queries,
 and generic ntsync wait integration. See `Documentation/iocp.rst` for its
 semantics and remaining work.
 
-## Arch Linux and CachyOS package
+## Arch Linux and CachyOS packages
 
 Install the headers for every kernel that should build the module. For the
 standard CachyOS kernel:
@@ -48,24 +48,32 @@ standard CachyOS kernel:
 sudo pacman -S --needed base-devel linux-cachyos-headers
 ```
 
-Other kernel variants need their corresponding headers package. Build the
-local package from the repository root with:
+Other kernel variants need their corresponding headers package. Build both
+local packages from the repository root with:
 
 ```sh
 cd package/arch
 makepkg -s
 ```
 
-Install the resulting package with:
+This produces two packages:
 
-```sh
-sudo pacman -U ./salkim-kernel-modules-dkms-*.pkg.tar.zst
-```
+- `ntsync-iocp-dkms`: ntsync with IOCP support, without AMDGPU.
+- `amdgpu-salkim-dkms`: the modified AMDGPU driver, without ntsync.
+
+Install either generated package by passing its filename to `sudo pacman -U`.
+To build and install both together, use `makepkg -si` instead.
+
+Both packages conflict with the old combined `salkim-kernel-modules-dkms`
+package. To keep both drivers when migrating, install both new packages in
+one transaction. Installing only one removes the old combined package and
+its other driver.
 
 DKMS builds ntsync for installed kernels with matching headers and AMDGPU for
 supported 7.3.x kernels. Modules are installed under `updates/dkms`.
 
-After DKMS installation, existing mkinitcpio presets are rebuilt if their
+The AMDGPU package alone manages initramfs updates. After its DKMS
+installation, existing mkinitcpio presets are rebuilt if their
 images already contain AMDGPU for a 7.3.x kernel. Removal rebuilds those
 images again so they use the distribution driver. Other initramfs generators
 need their normal manual regeneration procedure.
